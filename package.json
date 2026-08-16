@@ -1,6 +1,12 @@
 {
   "name": "proxima",
   "private": true,
+  "scripts": {
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start:backend": "node backend/dist/index.js",
+    "start:frontend": "npm --prefix frontend start",
+    "start:native": "npx pm2 start deploy/pm2.config.js"
+  },
   "dependencies": {
     "express-rate-limit": "^8.5.2",
     "puppeteer-core": "^23.11.1"

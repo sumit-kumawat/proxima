@@ -44,7 +44,7 @@ import {
   detachPassthrough,
   PassthroughRequestError,
 } from '../services/passthrough-request.service.js';
-import { getOwnedVm } from '../services/vm.service.js';
+import { getOwnedVm, syncExistingProxmoxInfrastructure } from '../services/vm.service.js';
 import {
   checkForUpdate,
   getUpdateStatus,
@@ -87,6 +87,16 @@ router.get('/audit', async (req: Request, res: Response) => {
   const limit = Number(req.query['limit']) || 100;
   const offset = Number(req.query['offset']) || 0;
   res.json(await listAudit({ limit, offset }));
+});
+
+// ─── POST /api/admin/infra/sync ────────────────────────────────
+router.post('/infra/sync', async (req: Request, res: Response) => {
+  try {
+    const result = await syncExistingProxmoxInfrastructure((req as any).user.id);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: pveMessage(err) });
+  }
 });
 
 // ─── GET /api/admin/settings ──────────────────────────────────

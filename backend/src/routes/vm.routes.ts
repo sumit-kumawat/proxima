@@ -74,6 +74,7 @@ import {
   exitRescue,
   duplicateVm,
   syncVmNode,
+  syncExistingProxmoxInfrastructure,
 } from '../services/vm.service.js';
 import { isValidPublicKey } from '../services/ssh-key.service.js';
 import { isIdeInstalling } from '../services/ide-provision.service.js';
@@ -145,10 +146,17 @@ export function rejectIfSizeLocked(
 
 router.get('/', async (req: Request, res: Response) => {
   const user = (req as AuthRequest).user;
-  // Tag each VM with the caller's access (owner/admin/co-owner/read-only) so the
-  // UI can badge shared VMs and gate write actions; the API enforces it regardless.
-  const vms = await annotateAccess(await refreshVmIps(await listVms(user)), user);
-  res.json(vms);
+  let vms = await listVms(user);
+  if (user.role === 'admin' && (vms.length === 0 || req.query['sync'] === 'true')) {
+    try {
+      await syncExistingProxmoxInfrastructure(user.id);
+      vms = await listVms(user);
+    } catch {
+      // Best effort discovery
+    }
+  }
+  const annotated = await annotateAccess(await refreshVmIps(vms), user);
+  res.json(annotated);
 });
 
 // ─── GET /api/vms/live-usage ──────────────────────────────────

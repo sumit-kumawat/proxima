@@ -1734,3 +1734,55 @@ export async function getStoragePinningReport(): Promise<StoragePinningReport> {
   pinned.sort((a, b) => a.migrationTargets - b.migrationTargets || a.name.localeCompare(b.name));
   return { defaultStorage, sharedStorages: [...shared].sort(), pinned, unknown, checked: vms.length };
 }
+
+/**
+ * Automatically discovers and adopts pre-existing Proxmox QEMU VMs and LXC containers
+ * into Proxima, mapping unmanaged Proxmox guests to the administrator account.
+ */
+export async function syncExistingProxmoxInfrastructure(adminUserId: string): Promise<{ imported: number; totalDiscovered: number }> {
+  const client = await pve.getClient();
+  const resourcesRes = await client.get<{ data: Array<{ vmid?: number; name?: string; type?: string; node?: string; status?: string; maxcpu?: number; maxmem?: number; maxdisk?: number; template?: number }> }>('/cluster/resources?type=vm');
+  const discovered = (resourcesRes.data?.data || []).filter((r) => r.vmid && !r.template);
+
+  if (discovered.length === 0) {
+    return { imported: 0, totalDiscovered: 0 };
+  }
+
+  // Get all currently registered VM IDs in Proxima
+  const existingVms = await prisma.virtualMachine.findMany({ select: { proxmoxVmId: true } });
+  const registeredVmIds = new Set(existingVms.map((v) => v.proxmoxVmId));
+
+  let importedCount = 0;
+
+  for (const res of discovered) {
+    if (!res.vmid || registeredVmIds.has(res.vmid)) continue;
+
+    const guestType = res.type === 'lxc' ? 'lxc' : 'qemu';
+    const cpuCores = res.maxcpu || 1;
+    const ramMb = res.maxmem ? Math.max(512, Math.round(res.maxmem / (1024 * 1024))) : 1024;
+    const storageGb = res.maxdisk ? Math.max(10, Math.round(res.maxdisk / (1024 * 1024 * 1024))) : 20;
+    const initialStatus = res.status === 'running' ? 'running' : 'stopped';
+    const vmName = res.name || `${guestType.toUpperCase()}-${res.vmid}`;
+
+    await prisma.virtualMachine.create({
+      data: {
+        userId: adminUserId,
+        name: vmName,
+        cpu: cpuCores,
+        ram: ramMb,
+        storage: storageGb,
+        os: `${guestType}-discovered`,
+        status: initialStatus,
+        proxmoxVmId: res.vmid,
+        proxmoxNode: res.node || 'pve',
+        type: guestType,
+        ipAddress: null,
+      },
+    });
+
+    importedCount++;
+  }
+
+  return { imported: importedCount, totalDiscovered: discovered.length };
+}
+

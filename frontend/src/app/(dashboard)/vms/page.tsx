@@ -304,11 +304,29 @@ export default function VmsPage() {
   const [vms, setVms] = useState<VirtualMachine[] | null>(null); // user view
   const [groups, setGroups] = useState<UserGroup[] | null>(null); // admin view
   const [error, setError] = useState<string | null>(null);
+  const [syncingInfra, setSyncingInfra] = useState(false);
 
   const reloadOwn = useCallback(async () => {
     const res = await api.get<VirtualMachine[]>("/vms");
     setVms(res.data);
   }, []);
+
+  const handleSyncInfra = async () => {
+    setSyncingInfra(true);
+    try {
+      const res = await api.post<{ ok: boolean; imported: number; totalDiscovered: number }>("/admin/infra/sync");
+      toast.success(`Infrastructure Sync: Imported ${res.data.imported} new guest(s) from Proxmox (${res.data.totalDiscovered} total found).`);
+      if (isAdmin) {
+        const gRes = await api.get<UserGroup[]>("/admin/all-vms");
+        setGroups(gRes.data);
+      }
+      await reloadOwn();
+    } catch (err) {
+      toast.error(apiError(err));
+    } finally {
+      setSyncingInfra(false);
+    }
+  };
 
   useEffect(() => {
     if (isAdmin) {
@@ -333,6 +351,12 @@ export default function VmsPage() {
         title="Virtual Machines"
         description={isAdmin ? "Every VM on the cluster, separated by owner." : "Your virtual machines."}
       >
+        {isAdmin && (
+          <Button variant="outline" onClick={handleSyncInfra} disabled={syncingInfra}>
+            {syncingInfra ? <Loader2 className="animate-spin" /> : <RotateCw />}
+            Sync Proxmox Infra
+          </Button>
+        )}
         <Button render={<Link href="/vms/new" />}>
           <Plus />
           New VM
