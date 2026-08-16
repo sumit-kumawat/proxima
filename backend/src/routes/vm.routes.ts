@@ -420,6 +420,11 @@ const CreateContainerSchema = z.object({
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
   proxmoxVmId: z.number().int().min(100).max(999999999).optional(),
+  ipMode: z.enum(['dhcp', 'static']).optional(),
+  ipAddress: z.preprocess(emptyToUndefined, z.string().optional()),
+  subnetMask: z.preprocess(emptyToUndefined, z.string().optional()),
+  gateway: z.preprocess(emptyToUndefined, z.string().optional()),
+  ip: z.preprocess(emptyToUndefined, z.string().optional()),
 });
 
 const handleContainerCreate = async (req: Request, res: Response) => {
@@ -459,6 +464,21 @@ const handleContainerCreate = async (req: Request, res: Response) => {
   if (parsed.data.forUserId && parsed.data.forUserId.trim() && parsed.data.forUserId !== 'self') {
     normalized.forUserId = parsed.data.forUserId.trim();
     normalized.quotaExempt = parsed.data.quotaExempt ?? (parsed.data.countQuota === false);
+  }
+
+  if (parsed.data.ipMode === 'static' && parsed.data.ipAddress) {
+    const mask = parsed.data.subnetMask
+      ? parsed.data.subnetMask.startsWith('/')
+        ? parsed.data.subnetMask
+        : `/${parsed.data.subnetMask}`
+      : '/24';
+    normalized.ip = `${parsed.data.ipAddress.trim()}${mask}`;
+    if (parsed.data.gateway && parsed.data.gateway.trim()) {
+      normalized.gateway = parsed.data.gateway.trim();
+    }
+  } else if (parsed.data.ip) {
+    normalized.ip = parsed.data.ip.trim();
+    if (parsed.data.gateway) normalized.gateway = parsed.data.gateway.trim();
   }
 
   const actor = (req as AuthRequest).user;

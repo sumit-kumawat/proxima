@@ -224,6 +224,8 @@ export interface CreateContainerInput {
   quotaExempt?: boolean;
   /** Admin-only: the owning tenant may operate but not RESIZE this container. */
   adminManaged?: boolean;
+  ip?: string;
+  gateway?: string;
 }
 
 /** Guess a container's CPU architecture from its OS-template filename. */
@@ -323,6 +325,8 @@ export async function createContainer(user: User, input: CreateContainerInput): 
         ostemplate: input.template,
         password: input.password,
         sshPublicKeys: input.sshKey,
+        ip: input.ip,
+        gateway: input.gateway,
       },
       client,
     );

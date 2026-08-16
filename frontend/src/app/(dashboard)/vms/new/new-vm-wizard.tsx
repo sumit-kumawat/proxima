@@ -21,6 +21,7 @@ import {
   Sparkles,
   Check,
   AlertCircle,
+  Network,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
@@ -105,6 +106,10 @@ export default function NewVmWizard() {
   const [storageGb, setStorageGb] = useState(CUSTOM_DISK_DEFAULT);
   const [iso, setIso] = useState("");
   const [lxcTemplate, setLxcTemplate] = useState("");
+  const [ipMode, setIpMode] = useState<"dhcp" | "static">("dhcp");
+  const [ipAddress, setIpAddress] = useState("");
+  const [subnetMask, setSubnetMask] = useState("24");
+  const [gateway, setGateway] = useState("");
   const [password, setPassword] = useState("");
   const [sshKey, setSshKey] = useState("");
   const [username, setUsername] = useState("debian");
@@ -425,6 +430,10 @@ export default function NewVmWizard() {
           lxcTemplate: targetLxcTemplate,
           sshKey: sshKey.trim() || undefined,
           password: password || undefined,
+          ipMode,
+          ipAddress: ipMode === "static" ? ipAddress.trim() : undefined,
+          subnetMask: ipMode === "static" ? subnetMask.trim() : undefined,
+          gateway: ipMode === "static" ? gateway.trim() : undefined,
         };
         if (isAdmin) {
           if (forUserId !== SELF) {
@@ -698,40 +707,101 @@ export default function NewVmWizard() {
                   )}
 
                   {isContainer && (
-                    <FormField label="Container Template" error={errors.lxcTemplate} hint="Select an LXC Linux container template. Required to proceed.">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
-                        {lxcTemplates.map((t) => {
-                          const isSelected = lxcTemplate === t.volid;
-                          return (
-                            <div
-                              key={t.volid}
-                              onClick={() => setLxcTemplate(t.volid)}
-                              className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                                isSelected ? "border-primary bg-primary/10 font-semibold shadow-xs" : "hover:border-primary/50 hover:bg-muted/50"
-                              }`}
-                            >
-                              <Container className={`size-5 shrink-0 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
-                              <div className="truncate text-xs">
-                                <div className="font-medium text-foreground truncate">{t.name}</div>
-                                <div className="text-[11px] text-muted-foreground font-mono truncate">{t.volid}</div>
+                    <div className="space-y-4">
+                      <FormField label="Container Template" error={errors.lxcTemplate} hint="Select an LXC Linux container template. Required to proceed.">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                          {lxcTemplates.map((t) => {
+                            const isSelected = lxcTemplate === t.volid;
+                            return (
+                              <div
+                                key={t.volid}
+                                onClick={() => setLxcTemplate(t.volid)}
+                                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                                  isSelected ? "border-primary bg-primary/10 font-semibold shadow-xs" : "hover:border-primary/50 hover:bg-muted/50"
+                                }`}
+                              >
+                                <Container className={`size-5 shrink-0 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                                <div className="truncate text-xs">
+                                  <div className="font-medium text-foreground truncate">{t.name}</div>
+                                  <div className="text-[11px] text-muted-foreground font-mono truncate">{t.volid}</div>
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
+                        <Select value={lxcTemplate} onValueChange={(v: any) => setLxcTemplate(String(v))}>
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder={lxcTemplates.length ? "Select LXC template..." : "No container templates available"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {lxcTemplates.map((t) => (
+                              <SelectItem key={t.volid} value={t.volid}>
+                                {t.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+
+                      <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
+                        <div className="flex items-center justify-between border-b pb-2">
+                          <div className="font-semibold text-xs text-foreground flex items-center gap-1.5">
+                            <Network className="size-4 text-primary" /> Network Configuration (IP / Subnet / Gateway)
+                          </div>
+                          <Badge variant="outline" className="text-[10px] font-mono">LXC Network</Badge>
+                        </div>
+
+                        <FormField label="IP Address Assignment Mode">
+                          <div className="grid grid-cols-2 gap-2">
+                            <Button
+                              type="button"
+                              variant={ipMode === "dhcp" ? "default" : "outline"}
+                              onClick={() => setIpMode("dhcp")}
+                              className="h-9 text-xs"
+                            >
+                              DHCP (Auto-assign)
+                            </Button>
+                            <Button
+                              type="button"
+                              variant={ipMode === "static" ? "default" : "outline"}
+                              onClick={() => setIpMode("static")}
+                              className="h-9 text-xs"
+                            >
+                              Static IP Configuration
+                            </Button>
+                          </div>
+                        </FormField>
+
+                        {ipMode === "static" && (
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                            <FormField label="IPv4 Address" hint="e.g. 192.168.1.50">
+                              <Input
+                                value={ipAddress}
+                                onChange={(e) => setIpAddress(e.target.value)}
+                                placeholder="192.168.1.50"
+                                className="font-mono text-xs h-9"
+                              />
+                            </FormField>
+                            <FormField label="Subnet CIDR / Mask" hint="e.g. /24 or 24">
+                              <Input
+                                value={subnetMask}
+                                onChange={(e) => setSubnetMask(e.target.value)}
+                                placeholder="24"
+                                className="font-mono text-xs h-9"
+                              />
+                            </FormField>
+                            <FormField label="Default Gateway" hint="e.g. 192.168.1.1">
+                              <Input
+                                value={gateway}
+                                onChange={(e) => setGateway(e.target.value)}
+                                placeholder="192.168.1.1"
+                                className="font-mono text-xs h-9"
+                              />
+                            </FormField>
+                          </div>
+                        )}
                       </div>
-                      <Select value={lxcTemplate} onValueChange={(v: any) => setLxcTemplate(String(v))}>
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder={lxcTemplates.length ? "Select LXC template..." : "No container templates available"} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {lxcTemplates.map((t) => (
-                            <SelectItem key={t.volid} value={t.volid}>
-                              {t.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </FormField>
+                    </div>
                   )}
 
                   {isRestore && (

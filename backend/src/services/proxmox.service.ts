@@ -799,6 +799,9 @@ export interface CreateLxcConfig {
   password?: string;
   sshPublicKeys?: string; // OpenSSH public key(s)
   unprivileged?: boolean; // default true
+  ip?: string; // e.g. "192.168.1.50/24" or "dhcp"
+  gateway?: string; // e.g. "192.168.1.1"
+  vlan?: number;
 }
 
 /**
@@ -809,6 +812,19 @@ export interface CreateLxcConfig {
  */
 export async function createLxc(config: CreateLxcConfig, client?: AxiosInstance): Promise<string> {
   const c = client ?? (await getClient());
+  const ipConfig = config.ip
+    ? config.ip.includes('/')
+      ? config.ip
+      : `${config.ip}/24`
+    : 'dhcp';
+  let net0Str = `name=eth0,bridge=${config.bridge},firewall=1,ip=${ipConfig}`;
+  if (config.gateway) {
+    net0Str += `,gw=${config.gateway}`;
+  }
+  if (config.vlan) {
+    net0Str += `,tag=${config.vlan}`;
+  }
+
   const params = new URLSearchParams({
     vmid: String(config.vmid),
     hostname: config.hostname,
@@ -816,8 +832,7 @@ export async function createLxc(config: CreateLxcConfig, client?: AxiosInstance)
     memory: String(config.memory),
     swap: String(config.swap ?? 512),
     rootfs: `${config.storage}:${config.diskGb}`,
-    // firewall=1 enables the per-NIC Proxmox firewall (tenant isolation).
-    net0: `name=eth0,bridge=${config.bridge},firewall=1,ip=dhcp`,
+    net0: net0Str,
     ostemplate: config.ostemplate,
     unprivileged: config.unprivileged === false ? '0' : '1',
     start: '0',
