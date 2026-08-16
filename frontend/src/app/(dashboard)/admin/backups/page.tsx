@@ -79,9 +79,26 @@ interface VmPolicy {
   user: { email: string; displayName: string };
 }
 
+interface ProxmoxClusterJob {
+  id?: string;
+  vmid?: string;
+  schedule?: string;
+  storage?: string;
+  comment?: string;
+  enabled?: number | boolean;
+  starttime?: string;
+  dow?: string;
+}
+
+interface PoliciesResponse {
+  jobs?: ProxmoxClusterJob[];
+  vms?: VmPolicy[];
+}
+
 export default function AdminBackupsPage() {
   const [backups, setBackups] = useState<MateStateBackup[] | null>(null);
   const [policies, setPolicies] = useState<VmPolicy[] | null>(null);
+  const [clusterJobs, setClusterJobs] = useState<ProxmoxClusterJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -91,11 +108,17 @@ export default function AdminBackupsPage() {
   const loadData = useCallback(() => {
     Promise.all([
       api.get<MateStateBackup[]>("/admin/backups/all"),
-      api.get<VmPolicy[]>("/admin/backups/policies"),
+      api.get<PoliciesResponse | VmPolicy[]>("/admin/backups/policies"),
     ])
       .then(([bRes, pRes]) => {
         setBackups(bRes.data);
-        setPolicies(pRes.data);
+        if (Array.isArray(pRes.data)) {
+          setPolicies(pRes.data);
+          setClusterJobs([]);
+        } else {
+          setPolicies(pRes.data.vms || []);
+          setClusterJobs(pRes.data.jobs || []);
+        }
         setError(null);
       })
       .catch((err) => setError(apiError(err)));
@@ -360,13 +383,65 @@ export default function AdminBackupsPage() {
         </TabsContent>
 
         {/* Tab 2: Backup Policies & Schedules */}
-        <TabsContent value="policies" className="space-y-4">
+        <TabsContent value="policies" className="space-y-6">
+          {clusterJobs.length > 0 && (
+            <Card className="border-primary/30 bg-primary/5">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-semibold flex items-center gap-2 text-foreground">
+                  <DatabaseBackup className="size-4 text-primary" /> Registered Proxmox Cluster Backup Jobs ({clusterJobs.length})
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  Active cluster-level VZDump backup schedules registered on Proxmox VE.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <div className="border rounded-md bg-background overflow-hidden">
+                  <Table className="min-w-[40rem] text-xs">
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead className="w-[30%]">Job ID / Target VMs</TableHead>
+                        <TableHead className="w-[25%]">Cron / Schedule</TableHead>
+                        <TableHead className="w-[20%]">Storage Pool</TableHead>
+                        <TableHead className="w-[15%]">Status</TableHead>
+                        <TableHead className="w-[10%] text-right">Comment</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {clusterJobs.map((j, idx) => (
+                        <TableRow key={j.id || idx}>
+                          <TableCell className="font-mono font-medium">
+                            <div>{j.id || `backup-job-${idx + 1}`}</div>
+                            <div className="text-[11px] text-muted-foreground">VMs: {j.vmid || "All Cluster VMs"}</div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="font-mono text-[11px] gap-1">
+                              <Clock className="size-3 text-primary" /> {j.schedule || j.starttime || "Default"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{j.storage || "local"}</TableCell>
+                          <TableCell>
+                            <Badge variant={j.enabled !== 0 ? "default" : "secondary"} className="text-[10px]">
+                              {j.enabled !== 0 ? "Active / Enabled" : "Disabled"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right text-muted-foreground truncate max-w-[120px]">
+                            {j.comment || "Proxima Backup Job"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <div>
-                <CardTitle className="text-base">Datacenter Backup Jobs & Schedules</CardTitle>
+                <CardTitle className="text-base">Datacenter Guest Schedules & Policies</CardTitle>
                 <CardDescription className="text-xs mt-1">
-                  Datacenter backup job configurations, cron schedule rules, and retention policies.
+                  Individual virtual machine & container backup schedules and retention rules.
                 </CardDescription>
               </div>
               <Button size="sm" variant="outline" render={<Link href="/admin/backups/new" />}>

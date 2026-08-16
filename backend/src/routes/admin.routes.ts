@@ -1244,14 +1244,16 @@ router.post('/backups/jobs', async (req: Request, res: Response) => {
     });
     const vmidsStr = vms.map((v) => v.proxmoxVmId).join(',');
     if (vmidsStr) {
-      await client.post('/cluster/backup', {
+      const params = new URLSearchParams({
         vmid: vmidsStr,
-        schedule: cron,
         storage: storage || 'local',
         compress: 'zstd',
         mode: 'snapshot',
-        comment: comment || 'Proxima Backup Job',
-      }).catch(() => undefined);
+        enabled: '1',
+      });
+      if (cron) params.set('schedule', cron);
+      if (comment) params.set('comment', comment);
+      await client.post('/cluster/backup', params);
     }
   } catch (err) {
     console.warn('[admin/backups] Proxmox cluster backup notice:', pveMessage(err));
@@ -1261,8 +1263,17 @@ router.post('/backups/jobs', async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/admin/backups/policies ──────────────────────────
-// Datacenter-wide backup policies and VM schedule rules.
+// Datacenter-wide backup policies and Proxmox cluster backup jobs.
 router.get('/backups/policies', async (_req: Request, res: Response) => {
+  let clusterJobs: any[] = [];
+  try {
+    const client = await pve.getClient();
+    const clusterRes = await client.get<{ data: any[] }>('/cluster/backup');
+    clusterJobs = clusterRes.data?.data || [];
+  } catch (err) {
+    console.warn('[admin/backups] Failed to fetch Proxmox cluster backup jobs:', pveMessage(err));
+  }
+
   const vms = await prisma.virtualMachine.findMany({
     select: {
       id: true,
@@ -1276,7 +1287,8 @@ router.get('/backups/policies', async (_req: Request, res: Response) => {
     },
     orderBy: { proxmoxVmId: 'asc' },
   });
-  res.json(vms);
+
+  res.json({ jobs: clusterJobs, vms });
 });
 
 // ─── POST /api/admin/backups/run-now ──────────────────────────

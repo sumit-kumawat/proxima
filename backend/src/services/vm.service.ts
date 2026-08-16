@@ -46,6 +46,7 @@ export interface CreateVmInput {
   quotaExempt?: boolean;
   /** Admin-only: the owning tenant may operate but not RESIZE this VM. */
   adminManaged?: boolean;
+  proxmoxVmId?: number;
 }
 
 /** Check the requested resources against the user's remaining quota. */
@@ -156,7 +157,16 @@ export async function createVm(user: User, input: CreateVmInput): Promise<Virtua
       'amd64',
     );
   }
-  const vmid = await pve.getNextVmId(client);
+  let vmid: number;
+  if (input.proxmoxVmId) {
+    const existing = await prisma.virtualMachine.findFirst({ where: { proxmoxVmId: input.proxmoxVmId } });
+    if (existing) {
+      throw new Error(`Proxmox VMID ${input.proxmoxVmId} is already in use by guest "${existing.name}".`);
+    }
+    vmid = input.proxmoxVmId;
+  } else {
+    vmid = await pve.getNextVmId(client);
+  }
 
   const vm = await prisma.virtualMachine.create({
     data: {
@@ -226,6 +236,7 @@ export interface CreateContainerInput {
   adminManaged?: boolean;
   ip?: string;
   gateway?: string;
+  proxmoxVmId?: number;
 }
 
 /** Guess a container's CPU architecture from its OS-template filename. */
@@ -292,7 +303,16 @@ export async function createContainer(user: User, input: CreateContainerInput): 
       archFromTemplate(input.template),
     );
   }
-  const vmid = await pve.getNextVmId(client);
+  let vmid: number;
+  if (input.proxmoxVmId) {
+    const existing = await prisma.virtualMachine.findFirst({ where: { proxmoxVmId: input.proxmoxVmId } });
+    if (existing) {
+      throw new Error(`Proxmox VMID ${input.proxmoxVmId} is already in use by guest "${existing.name}".`);
+    }
+    vmid = input.proxmoxVmId;
+  } else {
+    vmid = await pve.getNextVmId(client);
+  }
 
   const vm = await prisma.virtualMachine.create({
     data: {
@@ -367,6 +387,7 @@ export interface DeployTemplateInput {
   quotaExempt?: boolean;
   /** Admin-only: the owning tenant may operate but not RESIZE this VM. */
   adminManaged?: boolean;
+  proxmoxVmId?: number;
 }
 
 /** Cloud-init knobs shared by template deploys and rebuilds. */
@@ -608,7 +629,16 @@ export async function deployFromTemplate(
   const isolate = (await getConfig('isolation_enabled')) !== 'false';
 
   const node = template.proxmoxNode; // linked clone stays on the template's node
-  const vmid = await pve.getNextVmId(client);
+  let vmid: number;
+  if (input.proxmoxVmId) {
+    const existing = await prisma.virtualMachine.findFirst({ where: { proxmoxVmId: input.proxmoxVmId } });
+    if (existing) {
+      throw new Error(`Proxmox VMID ${input.proxmoxVmId} is already in use by guest "${existing.name}".`);
+    }
+    vmid = input.proxmoxVmId;
+  } else {
+    vmid = await pve.getNextVmId(client);
+  }
 
   const vm = await prisma.virtualMachine.create({
     data: {
@@ -1237,6 +1267,12 @@ async function waitForStopped(
   }
 }
 
+const recentlyDeletedVmIds = new Set<number>();
+export function markVmIdDeleted(vmid: number): void {
+  recentlyDeletedVmIds.add(vmid);
+  setTimeout(() => recentlyDeletedVmIds.delete(vmid), 120_000);
+}
+
 /**
  * Hard-stop (if needed) and delete a VM on Proxmox, leaving our DB row untouched.
  * A VM that no longer exists on Proxmox is treated as already gone (not an error),
@@ -1261,7 +1297,10 @@ async function stopAndDeleteProxmoxVm(
   }
 
   try {
-    await pve.deleteVm(node, vmid, client, kind);
+    const upid = await pve.deleteVm(node, vmid, client, kind);
+    if (upid) {
+      await pve.waitForTask(node, upid, client).catch(() => undefined);
+    }
   } catch (err) {
     // If the VM no longer exists on Proxmox, treat it as already deleted.
     const msg = pve.pveMessage(err);
@@ -1271,6 +1310,7 @@ async function stopAndDeleteProxmoxVm(
 
 export async function destroyVm(vm: VirtualMachine): Promise<void> {
   const currentVm = await syncVmNode(vm).catch(() => vm);
+  markVmIdDeleted(currentVm.proxmoxVmId);
   try {
     const client = await pve.getClient();
     await stopAndDeleteProxmoxVm(currentVm.proxmoxNode, currentVm.proxmoxVmId, client, kindOf(currentVm));
@@ -1752,7 +1792,9 @@ export async function getStoragePinningReport(): Promise<StoragePinningReport> {
 export async function syncExistingProxmoxInfrastructure(adminUserId: string): Promise<{ imported: number; totalDiscovered: number }> {
   const client = await pve.getClient();
   const resourcesRes = await client.get<{ data: Array<{ vmid?: number; name?: string; type?: string; node?: string; status?: string; maxcpu?: number; maxmem?: number; maxdisk?: number; template?: number }> }>('/cluster/resources?type=vm');
-  const discovered = (resourcesRes.data?.data || []).filter((r) => r.vmid && !r.template);
+  const discovered = (resourcesRes.data?.data || []).filter(
+    (r) => r.vmid && !r.template && !recentlyDeletedVmIds.has(r.vmid),
+  );
 
   if (discovered.length === 0) {
     return { imported: 0, totalDiscovered: 0 };
