@@ -1,0 +1,157 @@
+import express, { type Request, type Response } from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
+import setupRoutes from './routes/setup.routes.js';
+import authRoutes from './routes/auth.routes.js';
+import inviteRoutes from './routes/invite.routes.js';
+import vmRoutes from './routes/vm.routes.js';
+import proxmoxRoutes from './routes/proxmox.routes.js';
+import userRoutes from './routes/user.routes.js';
+import adminRoutes from './routes/admin.routes.js';
+import templateRoutes from './routes/template.routes.js';
+import sshKeyRoutes from './routes/ssh-key.routes.js';
+import apiTokenRoutes from './routes/api-token.routes.js';
+import quotaRequestRoutes from './routes/quota-request.routes.js';
+import passthroughRequestRoutes from './routes/passthrough-request.routes.js';
+import downloadRoutes from './routes/download.routes.js';
+import broadcastRoutes from './routes/broadcast.routes.js';
+import ideRoutes from './routes/ide.routes.js';
+import ideGatewayRoutes from './routes/ide-gateway.routes.js';
+import { openApiSpec } from './lib/openapi.js';
+import { errorHandler } from './middleware/errorHandler.js';
+import { observability } from './middleware/observability.js';
+import { apiWriteLimiter } from './middleware/rate-limit.js';
+import { prisma } from './lib/prisma.js';
+import { registry } from './lib/metrics.js';
+import { getVersion } from './services/proxmox.service.js';
+import { mountIdeProxy } from './services/ide-proxy.service.js';
+import { MODULE_MOUNT_ROOT, moduleRouter } from './modules/registry.js';
+
+const app = express();
+
+// Behind a reverse proxy / tunnel (Cloudflare, Tailscale, nginx), set
+// TRUST_PROXY to the number of trusted hops so rate limiting & req.ip use the
+// real client IP. Default 0 = trust none (direct connections / dev).
+app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 0));
+
+// Proxima IDE reverse proxy (in-guest code-server). Mounted FIRST so it streams
+// the raw request body to code-server and passes code-server's own response
+// headers through untouched — ahead of helmet/CORS/json-parsing/rate-limiting,
+// which would otherwise mangle an editor session. It only claims
+// /api/ide/:id/proxy/* (own cookie + ownership auth); everything else falls through.
+mountIdeProxy(app);
+
+// ─── Global Middleware ────────────────────────────────────────
+// Request id + structured access log + latency metric, first so everything is covered.
+app.use(observability);
+
+// Proxima LLM gateway (Bearer-token; called server-to-server by the in-guest AI
+// agent — no browser session). Mounted BEFORE helmet/cors/the shared json parser +
+// write limiter: chat payloads routinely exceed the 1 MB API cap, and streaming
+// chat must never be throttled as a "write". It claims only /api/ide/:id/llm/v1/*;
+// any other /api/ide path finds no route here and falls through to ideRoutes below.
+app.use('/api/ide/:id/llm', express.json({ limit: '15mb' }));
+app.use('/api/ide', ideGatewayRoutes);
+
+app.use(helmet());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true,
+}));
+app.use(cookieParser());
+// Explicit body cap: bounds request size (DoS) and is large enough for the
+// admin template-icon data-URI (~400 KB) that the default 100 KB silently rejected.
+app.use(express.json({ limit: '1mb' }));
+// Throttle all mutating API requests (skips safe GETs) — see rate-limit.ts.
+app.use('/api', apiWriteLimiter);
+
+// ─── Health & Observability ───────────────────────────────────
+// Liveness always checks the DB; `?deep=1` additionally probes Proxmox (slower).
+app.get('/api/health', async (req: Request, res: Response) => {
+  const deep = req.query['deep'] === '1' || req.query['deep'] === 'true';
+  const checks: Record<string, string> = {};
+  let ok = true;
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    checks['db'] = 'ok';
+  } catch {
+    checks['db'] = 'down';
+    ok = false;
+  }
+  if (deep) {
+    try {
+      await getVersion();
+      checks['proxmox'] = 'ok';
+    } catch {
+      // Proxmox being unreachable is reported but isn't a liveness failure —
+      // the app can still serve auth/UI while the cluster is down.
+      checks['proxmox'] = 'unreachable';
+    }
+  }
+  res
+    .status(ok ? 200 : 503)
+    .json({ status: ok ? 'ok' : 'degraded', service: 'proxima-api', checks, timestamp: new Date().toISOString() });
+});
+
+// Prometheus scrape endpoint.
+// Production default: require METRICS_TOKEN (Bearer). In non-production, leave
+// METRICS_TOKEN unset to scrape freely (local/dev). Set METRICS_TOKEN always when
+// /metrics is reachable beyond localhost.
+app.get('/metrics', async (req: Request, res: Response) => {
+  const token = process.env['METRICS_TOKEN'];
+  const isProd = (process.env.NODE_ENV || 'development') === 'production';
+  if (isProd && !token) {
+    res.status(404).end();
+    return;
+  }
+  if (token && req.headers.authorization !== `Bearer ${token}`) {
+    res.status(401).end();
+    return;
+  }
+  res.setHeader('Content-Type', registry.contentType);
+  res.end(await registry.metrics());
+});
+
+// Machine-readable API description for the public REST API (CLI / Terraform / clients).
+app.get('/api/openapi.json', (_req: Request, res: Response) => {
+  res.json(openApiSpec);
+});
+
+// ─── Routes ───────────────────────────────────────────────────
+app.use('/api/setup', setupRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/invites', inviteRoutes);
+app.use('/api/vms', vmRoutes);
+app.use('/api/proxmox', proxmoxRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/admin', adminRoutes);
+// The LLM gateway is mounted EARLY (above, before the shared middleware) so it
+// escapes the 1 MB body cap + write limiter. Here we mount only the session-authed
+// IDE routes; any `/:id/llm/v1/*` was already handled, and everything else
+// (`/config`, `/:id/gateway-token`, `/keys`) lands here.
+app.use('/api/ide', ideRoutes);
+app.use('/api/templates', templateRoutes);
+app.use('/api/ssh-keys', sshKeyRoutes);
+app.use('/api/api-tokens', apiTokenRoutes);
+app.use('/api/quota-requests', quotaRequestRoutes);
+app.use('/api/passthrough-requests', passthroughRequestRoutes);
+// Public (token-authenticated) backup downloads — no session required.
+app.use('/api/downloads', downloadRoutes);
+// Public (HMAC-token) broadcast-email unsubscribe — clicked from email, no session.
+app.use('/api/broadcast', broadcastRoutes);
+// console.routes (VNC WebSocket proxy) is attached to the HTTP upgrade event in index.ts
+
+// ─── Optional modules ─────────────────────────────────────────
+// Module routers (see src/modules/) attach INSIDE this one at /api/ext/<name>.
+// Mounted HERE and nowhere else: AFTER every core route above, so a module can never
+// shadow a Proxima endpoint; and BEFORE errorHandler below, so module errors —
+// including Express 5's auto-forwarded async rejections — are handled exactly like
+// core ones. Reserving the /api/ext segment is what makes shadowing structurally
+// impossible rather than merely unlikely. Empty unless PROXIMA_MODULES names a module.
+app.use(MODULE_MOUNT_ROOT, moduleRouter);
+
+// ─── Global Error Handler ─────────────────────────────────────
+app.use(errorHandler);
+
+export { app };

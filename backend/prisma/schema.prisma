@@ -1,0 +1,575 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  displayName   String
+  role          String    @default("user") // "admin" | "user"
+
+  // SSO (OIDC) link — the provider's stable `sub` claim, set on first SSO login.
+  ssoSubject    String?   @unique
+
+  // Two-factor auth (TOTP). `twoFactorSecret` is the AES-encrypted base32 secret.
+  twoFactorEnabled Boolean  @default(false)
+  twoFactorSecret  String?
+  // Admin-enforced (via the invite): user must set up a 2FA method before using Proxima.
+  require2fa       Boolean  @default(false)
+
+  // Brute-force lockout: consecutive failed-password count + a temporary lock
+  // window. Reset on any successful password verification; auto-expires.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
+  // Resource Quotas (set from invite token at registration)
+  maxCpu        Int       @default(0)      // total vCPU cores allowed
+  maxRam        Int       @default(0)      // total RAM in MB
+  maxStorage    Int       @default(0)      // total disk in GB
+
+  // Community Edition: opted out of admin broadcast (announcement) emails.
+  // Transactional / security / notification emails are unaffected. The EDU
+  // edition deliberately has no opt-out (instructors must reach every student).
+  broadcastOptOut Boolean @default(false)
+
+  // ── Compute access window ────────────────────────────────────────────────
+  // How long this tenant may use the cluster. Seeded from the invite's
+  // accessDuration at registration; an admin can extend or clear it later.
+  //
+  // NULL MEANS NEVER EXPIRES — that is the default, so every pre-existing
+  // account (and every admin) keeps working untouched after this migration.
+  // Admins are exempt regardless of the value.
+  accessExpiresAt DateTime?
+  // Set when the expiry lapsed and the tenant was suspended (VMs powered off,
+  // sign-in refused). Cleared the moment access is extended or set to never,
+  // which is what makes suspension reversible. Also stops the scheduler
+  // re-stopping VMs and re-notifying admins on every tick.
+  accessSuspendedAt DateTime?
+  // Which expiry value each warning email was sent FOR. Comparing against the
+  // CURRENT accessExpiresAt (rather than storing a bare "sent" flag) means an
+  // admin extending the window automatically re-arms both warnings, and a
+  // warning is never sent twice for the same deadline.
+  accessWarned7For DateTime?
+  accessWarned1For DateTime?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  vms            VirtualMachine[]
+  invitesCreated InviteToken[]  @relation("CreatedInvites")
+  usedInvite     InviteToken?   @relation("UsedInvite")
+  sessions       Session[]
+  sshKeys        SshKey[]
+  apiTokens      ApiToken[]
+  vmShares       VmShare[]
+  quotaRequests  QuotaRequest[]
+  passthroughRequests PassthroughRequest[]
+  ideGatewayTokens IdeGatewayToken[]
+  llmKeys        TenantLlmKey[]
+}
+
+// A tenant's request to raise their resource quota; an admin approves (applies the
+// new caps) or denies. Absolute target values, so approval just writes them onto
+// the user. One pending request per user at a time (enforced in the service).
+model QuotaRequest {
+  id           String    @id @default(cuid())
+  userId       String
+  cpu          Int                       // requested new max vCPU
+  ram          Int                       // requested new max RAM (MB)
+  storage      Int                       // requested new max storage (GB)
+  reason       String?
+  status       String    @default("pending") // pending | approved | denied
+  createdAt    DateTime  @default(now())
+  resolvedAt   DateTime?
+  resolvedById String?                   // admin who approved/denied
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+}
+
+// A personal API token for programmatic access (CLI / Terraform / scripts). The raw
+// token (prefix `pm_…`) is shown once at creation; only its SHA-256 hash is stored.
+// A request bearing it acts as the owning user.
+model ApiToken {
+  id         String    @id @default(cuid())
+  userId     String
+  name       String                     // user-friendly label, e.g. "ci"
+  tokenHash  String    @unique          // SHA-256 of the raw token
+  prefix     String                     // first chars of the raw token, for display
+  lastUsedAt DateTime?
+  expiresAt  DateTime?                  // null = never expires
+  createdAt  DateTime  @default(now())
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Per-VM token that authenticates the in-guest IDE's AI agent (OpenCode) to the
+// Proxima LLM gateway. OpenCode has no Proxima session cookie, so it bears this
+// token instead; the gateway resolves it to (user, vm), re-checks ownership + the
+// IDE policy, and enforces the shared-model allow-list. Only the SHA-256 hash is
+// stored (raw `pmide_…` shown once at mint / rotation). One active token per
+// (user, vm) — re-provisioning rotates it. Revocable + optional expiry.
+model IdeGatewayToken {
+  id         String    @id @default(cuid())
+  userId     String
+  vmId       String
+  tokenHash  String    @unique          // SHA-256 of the raw token
+  prefix     String                     // first chars, for display
+  lastUsedAt DateTime?
+  expiresAt  DateTime?                  // null = valid until revoked / rotated
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, vmId])
+  @@index([vmId])
+}
+
+// A tenant's own LLM provider API key (bring-your-own), used ONLY through the
+// Proxima gateway (single controlled egress + audit + rate-limit). The key is
+// AES-256-GCM encrypted at rest (keyEnc) under ENCRYPTION_KEY and only decrypted
+// in-memory to forward one upstream request — it is never returned to any client.
+// `provider` selects the upstream shape; `baseUrl` overrides it for the
+// openai-compatible kind. Each row exposes exactly one `model` to the tenant.
+model TenantLlmKey {
+  id         String    @id @default(cuid())
+  userId     String
+  label      String                     // user-friendly, e.g. "my OpenAI"
+  provider   String                     // "openai" | "anthropic" | "openai-compatible"
+  model      String                     // upstream model name to expose
+  baseUrl    String?                    // custom base URL (openai-compatible)
+  keyEnc     String                     // AES-encrypted API key (never returned)
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// A reusable SSH public key saved to a user's profile, so cloud-init deploys can
+// pick from a dropdown instead of pasting the key every time (DigitalOcean-style).
+model SshKey {
+  id         String    @id @default(cuid())
+  userId     String
+  name       String                    // user-friendly label, e.g. "laptop"
+  publicKey  String                    // the OpenSSH public key line
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  userId      String
+  token       String   @unique
+  csrfToken   String?                  // double-submit CSRF token bound to this session
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+}
+
+model InviteToken {
+  id          String    @id @default(cuid())
+  token       String    @unique
+  createdById String
+  label       String?
+  email       String?   // address the invite link was emailed to, if any
+
+  maxCpu      Int
+  maxRam      Int
+  maxStorage  Int
+  require2fa  Boolean   @default(false) // force the invited user to set up 2FA
+
+  // How long the invited tenant may use the cluster once they register, as a
+  // duration string ('30d', '365d', …). NULL MEANS NEVER EXPIRES.
+  // Distinct from `expiresAt` below: that governs how long the invite LINK
+  // stays redeemable, this governs the compute window the link grants.
+  accessDuration String?
+
+  usedById    String?   @unique
+  // How long the invite LINK itself stays redeemable (not the compute window).
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  createdBy   User      @relation("CreatedInvites", fields: [createdById], references: [id])
+  usedBy      User?     @relation("UsedInvite", fields: [usedById], references: [id])
+
+  @@index([token])
+}
+
+model VirtualMachine {
+  id            String    @id @default(cuid())
+  userId        String
+  proxmoxVmId   Int
+  proxmoxNode   String
+  name          String
+  description   String?
+
+  // Guest kind: "qemu" (full VM, the original + default) or "lxc" (container).
+  // Drives the Proxmox API path segment and which features apply (LXC has no
+  // live migration, data disks, or cloud-init extras).
+  type          String    @default("qemu")
+
+  // True once a GPU / PCI device (a `hostpciN` mapping) is attached. A cheap
+  // signal so the balancer/drain can skip the VM without reading its Proxmox
+  // config — such a VM can't be live-migrated.
+  hasPassthrough Boolean  @default(false)
+
+  cpu           Int
+  ram           Int
+  storage       Int
+  os            String
+
+  status        String    @default("creating") // creating | running | stopped | error
+  ipAddress     String?
+
+  // The guest's Tailscale address (100.64.0.0/10), when Tailscale runs inside it —
+  // read from the same interface listing as ipAddress and kept separate so the
+  // LAN IP stays accurate. Cleared when Tailscale stops advertising.
+  tailscaleIp   String?
+
+  // Non-null while the VM is booted into rescue mode: a JSON snapshot of the
+  // pre-rescue { boot, ide3 } config lines, restored on "exit rescue".
+  rescueBoot    String?
+
+  // Proxima IDE install lifecycle for THIS guest (lazy, on first "Open IDE"):
+  //   null / 'none' = not installed; 'installing' = provisioning in progress
+  //   (guest is LOCKED — no console/stop/delete until done); 'ready' = the
+  //   native code-server service is up; 'failed' = install errored (retryable).
+  ideState      String?
+  ideStateAt    DateTime?
+
+  // Cloud-init deploy lock for THIS guest. When a VM is created (or rebuilt) from
+  // a cloud-init template, cloud-init keeps provisioning inside the guest after
+  // Proxmox already reports it 'running' — installing packages, the guest agent,
+  // the tenant's extras. Interrupting that mid-flight leaves a half-built box, so:
+  //   'deploying' = cloud-init still running (guest LOCKED — no stop/restart/
+  //   pause/delete/migrate); 'ready' = cloud-init reported done, or we gave up
+  //   waiting (timeout) and unlocked. null = not a tracked deploy (ISO, LXC, or a
+  //   plain non-cloud-init template). Cleared via a guest-agent `cloud-init status`
+  //   probe (see deploy-lock.service.ts).
+  deployState   String?
+  deployStateAt DateTime?
+
+  // The tenant's chosen login password, held ENCRYPTED (AES-256-GCM, same key as
+  // every other stored secret) only until cloud-init finishes and the guest agent
+  // can set it in-guest — then immediately nulled.
+  //
+  // Why it exists: passing the password to cloud-init as `cipassword` writes its
+  // crypt hash to the cloud-init seed AND to /var/lib/cloud/instances/<id>/ on the
+  // guest's own root disk, where the tenant can read it forever (verified live
+  // 2026-08-11; the 2026-07-18 pentest found the seed copy). So the password never
+  // goes to cloud-init at all — it is applied post-boot via the guest agent, which
+  // writes only to /etc/shadow.
+  //
+  // The trade is deliberate: a few minutes of reversibly-encrypted storage in the
+  // app DB, versus a crypt hash readable by the tenant for the life of the guest.
+  // Null for SSH-key-only deploys, and null again the moment it is applied.
+  pendingCiPassword String?
+
+  // True when an ADMIN deployed this VM into the owner's account as a grant that
+  // does NOT count toward their quota (unchecked "count against their quota" at
+  // deploy). Exempt VMs are excluded from every usage aggregation and stay
+  // exempt across resizes. Admin-set only.
+  quotaExempt   Boolean   @default(false)
+
+  // True when an ADMIN provisioned this VM into a tenant's account (deploy-for-
+  // tenant). The owning tenant may operate it but NOT resize it (cpu/ram/disk) —
+  // the admin sized it and manages that. Also a hard quota-safety requirement for
+  // quotaExempt grants: a tenant who could resize a free grant would bypass quota
+  // entirely. Only an admin can resize an admin-managed VM.
+  adminManaged  Boolean   @default(false)
+
+  // Optional user labels for grouping/filtering (lowercase, comma-separated).
+  tags          String?
+
+  // Optional power schedule (5-field cron, server timezone). Null = no auto action.
+  startCron     String?   // auto-start when this fires
+  stopCron      String?   // auto-shutdown (graceful) when this fires
+
+  // Optional per-VM backup policy. backupCron null = fall back to the cluster-wide
+  // weekly default; set = this VM is backed up on its own schedule instead.
+  // backupKeep null = default rolling retention (MATESTATE_RETENTION).
+  backupCron    String?   // 5-field cron; when set, a MateState is taken as it fires
+  backupKeep    Int?      // how many MateStates to keep for this VM
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  matestates    MateState[]
+  shares        VmShare[]
+  passthroughRequests PassthroughRequest[]
+  alertRules    AlertRule[]
+
+  @@index([userId])
+  @@index([proxmoxVmId])
+}
+
+// A tenant's request to attach GPU / PCI passthrough to a VM they own. Mirrors
+// QuotaRequest: an admin reviews, picks an available Proxmox PCI resource
+// mapping (defined by the admin in Proxmox), and attaches it — or denies. The
+// chosen mapping name is recorded on approval. One pending request per VM.
+model PassthroughRequest {
+  id           String    @id @default(cuid())
+  userId       String
+  vmId         String
+  reason       String?
+  status       String    @default("pending") // pending | approved | denied
+  mapping      String?                        // Proxmox PCI mapping name chosen at approval
+  // Background-apply progress: approving may stop + offline-migrate the VM to
+  // the device's node (minutes of disk copy), so the route returns 202 and the
+  // worker records its state here for the admin UI to poll. A failed apply
+  // leaves status=pending (retryable) with the reason in applyError.
+  applyState   String?                        // queued | stopping | migrating | attaching | done | failed
+  applyError   String?
+  targetNode   String?                        // node the apply migrated (or kept) the VM on
+  // Cloud-init drives the apply dropped pre-migration (JSON [{slot,storage}]),
+  // cleared once regenerated. Lets a startup reconciler restore them if the
+  // backend restarts mid-migration (a long copy can outlast a deploy).
+  ciDropped    String?
+  createdAt    DateTime  @default(now())
+  resolvedAt   DateTime?
+  resolvedById String?                        // admin who approved/denied
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vm           VirtualMachine @relation(fields: [vmId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([vmId])
+  @@index([status])
+}
+
+// Grants another tenant access to a VM they don't own, at a PRESET LEVEL:
+// "viewer" = see details/stats/activity; "operator" = + power actions & console;
+// "manager" = + settings/disks/backups/IDE. Capabilities derive from the preset in
+// code (vm-share.service.ts CAPS_BY_ROLE). No share ever deletes, migrates,
+// rebuilds, manages shares, or touches passthrough — owner/admin only. Legacy
+// values ("co-owner"→manager, "read-only"→viewer) are migrated + normalized on read.
+model VmShare {
+  id        String   @id @default(cuid())
+  vmId      String
+  userId    String                  // the user the VM is shared WITH
+  role      String   @default("viewer") // "viewer" | "operator" | "manager"
+  createdAt DateTime @default(now())
+
+  vm        VirtualMachine @relation(fields: [vmId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([vmId, userId])
+  @@index([userId])
+}
+
+// A point-in-time backup of a VM (Proxmox vzdump). "MateState" — never "droplet".
+// Strict rolling retention: only the 2 most recent per VM are kept; older are pruned.
+model MateState {
+  id            String    @id @default(cuid())
+  vmId          String                              // FK to VirtualMachine.id
+  proxmoxVmId   Int                                 // the VMID the backup was taken of
+  proxmoxNode   String                              // where the backup currently lives
+  storage       String                              // Proxmox storage holding the backup
+  volid         String    @unique                   // e.g. local:backup/vzdump-qemu-100-…
+  size          BigInt    @default(0)               // bytes (BigInt: real backups exceed Int32's ~2.1 GB)
+  status        String    @default("creating")      // creating | ready | restoring | error
+  kind          String    @default("scheduled")     // scheduled | manual
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  vm            VirtualMachine @relation(fields: [vmId], references: [id], onDelete: Cascade)
+
+  @@index([vmId])
+}
+
+model SystemConfig {
+  key         String    @id
+  value       String
+  sensitive   Boolean   @default(false)
+  updatedAt   DateTime  @updatedAt
+}
+
+// A single-use, expiring token that lets a tenant download one MateState backup
+// file over HTTP. Only the token's SHA-256 hash is stored; the raw token is
+// emailed. Requires an admin-mounted backup share (BACKUP_DOWNLOAD_DIR) — the
+// Proxmox API can't stream vzdump bytes, so Proxima reads the file off the mount.
+model DownloadToken {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique
+  userId      String                              // who requested it (for audit)
+  mateStateId String                              // the MateState being downloaded
+  filename    String                              // vzdump basename, validated + resolved under the mount
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
+// Append-only record of who did what, for trust/debugging/accountability on a
+// multi-tenant box. Deliberately NOT relationally tied to User: actorEmail is
+// denormalized so the trail survives a user (and their cascade) being deleted.
+model AuditLog {
+  id          String    @id @default(cuid())
+  userId      String?                       // acting user id (null for anonymous / failed login)
+  actorEmail  String?                       // denormalized actor email (outlives the user row)
+  action      String                        // e.g. "vm.create", "vm.delete", "auth.login"
+  targetType  String?                       // e.g. "vm", "matestate", "session"
+  targetId    String?                       // id/name of the affected entity
+  detail      String?                       // short human-readable summary
+  ip          String?                       // client IP (honors trust proxy)
+  createdAt   DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+}
+
+// Periodic per-VM usage sample for the per-tenant resource-history view. Like
+// AuditLog, userId/vmId are denormalized (no FK cascade) so history outlives a
+// deleted VM/user. Pruned to a rolling window by the scheduler.
+model ResourceSample {
+  id        String   @id @default(cuid())
+  userId    String                  // owner of the sampled VM
+  vmId      String                  // Proxima VM id
+  cpu       Float                   // 0..1 fraction of allocated vCPUs
+  mem       Float                   // used memory, bytes
+  maxmem    Float                   // allocated memory, bytes
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+}
+
+// A tenant-defined alert on one of their VMs. Evaluated on the resource-history
+// scheduler tick against live stats; fires a branded email (+ optional admin
+// webhook) when the condition holds for `sustainedMin` minutes, then respects a
+// cooldown. userId is denormalized (delivery target) like the other logs.
+model AlertRule {
+  id            String    @id @default(cuid())
+  vmId          String
+  userId        String                       // VM owner — the alert's recipient
+  metric        String                       // "cpu" | "memory" | "disk" | "down"
+  threshold     Int       @default(0)        // percent (0..100); ignored for "down"
+  sustainedMin  Int       @default(5)        // condition must hold this many minutes
+  enabled       Boolean   @default(true)
+
+  // Evaluation state (managed by the alert service, not the user):
+  breachingSince DateTime?                    // when the condition first became true (null = not breaching)
+  lastFiredAt    DateTime?                    // last time this rule sent — for cooldown
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  vm            VirtualMachine @relation(fields: [vmId], references: [id], onDelete: Cascade)
+
+  @@index([vmId])
+  @@index([userId])
+}
+
+// A published, cloneable OS build (maps to a Proxmox template VM).
+model Template {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+  os            String?                       // display label, e.g. "Debian 12"
+  arch          String?                       // guest CPU arch: "amd64" | "arm64" (null = legacy/unknown)
+  proxmoxVmId   Int                           // the Proxmox template's VMID
+  proxmoxNode   String                        // node the template lives on
+  diskGb        Int       @default(0)         // base disk size = minimum deployable disk
+  notes         String?                       // admin notes shown to users (e.g. default login creds)
+  cloudInit     Boolean   @default(false)      // true = cloud image; deploy injects SSH key/user (no ISO installer)
+  icon          String?                       // custom icon data-URI (admin upload); null = auto OS icon
+  published     Boolean   @default(true)
+
+  // Cloud-image provenance — set for templates built by the importer. Lets the
+  // store re-download the upstream image and rebuild a fresh, patched template.
+  sourceUrl     String?                       // the cloud image URL it was built from
+  refreshedAt   DateTime?                     // last successful refresh (null = never refreshed)
+
+  // Whether qemu-guest-agent is baked into this template's image. Proxima applies a
+  // cloud-init login password IN-GUEST through the agent (never as `cipassword`, which
+  // would leave the crypt hash where the tenant can read it), so a template without the
+  // agent cannot serve a password-only deploy. The builder proves this by booting the
+  // image once and waiting for the agent to answer.
+  //   null  = never determined (registered by hand, or built before this existed)
+  //   true  = the agent answered during the build
+  //   false = the bake ran and the agent never came up (e.g. no egress to install it)
+  guestAgent    Boolean?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([proxmoxVmId])
+}
+
+// Email-based password reset: the raw token is emailed; only its SHA-256 hash is
+// stored. Single-use (usedAt) and short-lived (expiresAt).
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// "Contact admin for a password reset" fallback when no SMTP is configured —
+// surfaced to admins, who set a temp password or issue a reset link.
+model PasswordResetRequest {
+  id         String    @id @default(cuid())
+  userId     String
+  email      String                      // denormalized for the admin list
+  status     String    @default("pending") // pending | handled
+  createdAt  DateTime  @default(now())
+  handledAt  DateTime?
+
+  @@index([status])
+}
+
+// One-time TOTP recovery codes (lost-device backup). Stored as SHA-256 hashes.
+model TwoFactorRecoveryCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// WebAuthn passkeys. `id` is the credential ID (base64url); `publicKey` is the
+// COSE public-key blob. `counter` guards against cloned-authenticator replay.
+model Passkey {
+  id         String    @id
+  userId     String
+  publicKey  Bytes
+  counter    Int       @default(0)
+  transports String?                   // CSV of authenticator transports
+  name       String                    // user-friendly label
+  deviceType String?                   // "singleDevice" | "multiDevice"
+  backedUp   Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
+}

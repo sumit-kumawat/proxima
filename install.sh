@@ -1,0 +1,854 @@
+#!/usr/bin/env bash
+#
+# Proxima installer.
+#
+# Brings up a Proxima stack with Docker Compose: preflight checks, a generated
+# ENCRYPTION_KEY, a correct .env for either an HTTP trial or a real HTTPS domain,
+# and the build. It stops at the browser setup wizard on purpose — the Proxmox
+# API token is entered there, never on a command line where it would land in
+# shell history or a process list.
+#
+# This script is meant to be READ before it is run. It is deliberately not a
+# `curl | sudo bash` one-liner: Proxima ends up holding a Proxmox token that is
+# effectively root on your cluster, so piping it into a root shell is the wrong
+# habit for exactly this software.
+#
+#   curl -fsSLO https://raw.githubusercontent.com/conzex/proxima/main/install.sh
+#   less install.sh
+#   bash install.sh
+#
+# Missing dependencies (Docker, Compose v2, git, curl, openssl) are detected and
+# — with your explicit consent — installed for you. They are not optional:
+# Proxima is a containerised application and will not run without them, so
+# declining simply stops the install without changing anything on the machine.
+#
+# Usage:
+#   bash install.sh                            # interactive
+#   bash install.sh --local                    # HTTP on this machine's LAN address
+#   bash install.sh --local --host 10.0.0.5    # HTTP on an address you choose
+#   bash install.sh --domain proxima.example.com
+#   bash install.sh --domain x --dir /opt/proxima --ref v0.8.6 --yes
+#
+# Flags:
+#   --local            HTTP, no reverse proxy. For a trial on a trusted network.
+#   --host <addr>      With --local: the address you will type in the browser.
+#                      Defaults to this machine's primary LAN IP. Use "localhost"
+#                      only if you browse from this same machine.
+#   --domain <host>    One HTTPS origin you will front with a reverse proxy.
+#   --dir <path>       Where to install (default: ./proxima, or the checkout you
+#                      are already standing in).
+#   --ref <git-ref>    Tag/branch to check out (default: newest vX.Y.Z tag).
+#   --no-start         Write everything but do not build or start.
+#   --yes, -y          Never prompt; requires --local or --domain. Also counts as
+#                      consent to install any missing dependencies listed above.
+#   --help, -h         This message.
+#
+# ── end of help text (usage() prints the block above) ────────────────────────
+set -euo pipefail
+
+REPO_URL="${PROXIMA_REPO_URL:-https://github.com/conzex/proxima.git}"
+HELP_LAST_LINE=44            # keep in sync with the marker line above
+INSTALL_DIR=""
+MODE=""
+DOMAIN=""
+HTTP_HOST=""
+GIT_REF=""
+ASSUME_YES=0
+DO_START=1
+ADOPTED_CWD=0
+TMP_ENV=""
+
+# ── output ────────────────────────────────────────────────────────────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+else
+  C_RESET=""; C_DIM=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
+fi
+
+step() { printf '%s==>%s %s\n' "$C_BLUE$C_BOLD" "$C_RESET$C_BOLD" "$*$C_RESET"; }
+ok()   { printf '  %s+%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+info() { printf '  %s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
+die()  { printf '\n%serror:%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }
+
+# A stray temp .env must never be left holding a freshly generated key.
+cleanup() { [ -n "$TMP_ENV" ] && [ -f "$TMP_ENV" ] && rm -f "$TMP_ENV"; return 0; }
+trap cleanup EXIT INT TERM
+
+usage() { sed -n "2,${HELP_LAST_LINE}p" "$0" | sed 's/^# \{0,1\}//; s/^#$//'; exit 0; }
+
+# ── args ──────────────────────────────────────────────────────────────────────
+# Keep a pristine copy: the loop below shifts every argument away, and the
+# docker-group re-exec much further down has to hand the ORIGINAL arguments to
+# the new shell. Reading "$@" down there yields nothing and the re-invoked script
+# then dies asking for the --local/--domain you already gave it.
+ORIG_ARGV=("$@")
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --local)    MODE="local"; shift ;;
+    --host)     [ $# -ge 2 ] || die "--host needs an address"
+                HTTP_HOST="$2"; shift 2 ;;
+    --domain)   [ $# -ge 2 ] || die "--domain needs a hostname"
+                MODE="domain"; DOMAIN="$2"; shift 2 ;;
+    --dir)      [ $# -ge 2 ] || die "--dir needs a path"
+                INSTALL_DIR="$2"; shift 2 ;;
+    --ref)      [ $# -ge 2 ] || die "--ref needs a git ref"
+                GIT_REF="$2"; shift 2 ;;
+    --no-start) DO_START=0; shift ;;
+    -y|--yes)   ASSUME_YES=1; shift ;;
+    -h|--help)  usage ;;
+    *)          die "unknown option: $1  (try --help)" ;;
+  esac
+done
+
+# A registrable hostname — not a URL, not a host:port, not a bare IP. It is baked
+# into the frontend bundle AND used as the WebAuthn RP ID, where a port or an IP
+# literal is invalid and silently breaks passkey registration.
+validate_domain() {
+  case "$1" in
+    "")                 die "--domain needs a hostname, e.g. proxima.example.com" ;;
+    *[!a-zA-Z0-9.-]*)   die "domain may only contain letters, digits, dots and hyphens (got: $1)
+  Drop any scheme, port or path — pass just the hostname." ;;
+    *.*)                : ;;
+    *)                  die "that doesn't look like a domain: $1" ;;
+  esac
+  case "$1" in
+    *[0-9].[0-9]*)
+      # 1.2.3.4 style. Passkeys require a real domain, so flag it rather than
+      # letting registration fail later with an opaque browser error.
+      if printf '%s' "$1" | grep -qE '^[0-9]+(\.[0-9]+){3}$'; then
+        die "--domain needs a DNS name, not an IP address ($1).
+  HTTPS certificates and passkeys both require a real hostname.
+  For an IP-based trial use:  --local --host $1"
+      fi ;;
+  esac
+}
+
+# ── 1. preflight ──────────────────────────────────────────────────────────────
+step "Checking prerequisites"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ── dependency resolution ────────────────────────────────────────────────────
+# Proxima cannot run without these. Rather than telling you to go and read three
+# other install guides, we offer to install them — but only ever after you say
+# yes, and never by piping a downloaded script straight into a root shell.
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if have sudo; then SUDO="sudo"; fi
+fi
+
+# Who is really doing this. Bash does NOT set $USER — login/PAM/sshd/su do — so
+# under `env -i`, cron, or a non-PAM context it is unset, and an unbound-variable
+# error under `set -u` is NOT caught by `|| die`; the script would abort with a raw
+# bash error as its entire output. Process credentials always exist.
+RUN_USER="$(id -un)"
+# Under `sudo bash install.sh` the invoking human is SUDO_USER, not root. Without
+# this the checkout, the mode-600 .env and ./backups all end up root-owned and the
+# human is never added to the docker group — see chown_to_invoker below.
+REAL_USER="${SUDO_USER:-$RUN_USER}"
+REAL_UID="${SUDO_UID:-$(id -u)}"
+REAL_GID="${SUDO_GID:-$(id -g)}"
+
+# usermod/addgroup live in /usr/sbin, which is NOT on a normal user's PATH on
+# several distros (and is stripped entirely by cron and `env -i`). Plain
+# `command -v usermod` therefore reports "missing" on a machine that has it, and
+# the caller then prints Alpine advice to a Fedora user. Resolve the real path.
+find_admin_tool() {
+  command -v "$1" 2>/dev/null && return 0
+  for _d in /usr/sbin /sbin /usr/local/sbin; do
+    [ -x "$_d/$1" ] && { printf '%s' "$_d/$1"; return 0; }
+  done
+  return 1
+}
+
+# Hand anything we created back to the human when we are root via sudo. Silent
+# no-op in every other case.
+chown_to_invoker() {
+  [ "$(id -u)" -eq 0 ] || return 0
+  [ -n "${SUDO_USER:-}" ] || return 0
+  [ -e "$1" ] || return 0
+  chown -R "$REAL_UID:$REAL_GID" "$1" 2>/dev/null || true
+}
+
+DISTRO_ID=""
+[ -r /etc/os-release ] && DISTRO_ID="$( . /etc/os-release 2>/dev/null && printf '%s' "${ID:-}" )"
+
+PKG_MGR=""
+detect_pkg_mgr() {
+  if   have apt-get; then PKG_MGR="apt"
+  elif have dnf;     then PKG_MGR="dnf"
+  elif have yum;     then PKG_MGR="yum"
+  elif have pacman;  then PKG_MGR="pacman"
+  elif have zypper;  then PKG_MGR="zypper"
+  elif have apk;     then PKG_MGR="apk"
+  fi
+}
+detect_pkg_mgr
+
+pkg_install() {
+  # $@ = package names, already translated for this distro
+  case "$PKG_MGR" in
+    # `VAR=x sudo cmd` sets the variable for SUDO, and sudo's default env_reset
+    # throws it away before cmd ever sees it. It has to go through `sudo env`.
+    apt)    $SUDO apt-get update -qq \
+              && $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+                   apt-get install -y -qq "$@" ;;
+    dnf)    $SUDO dnf install -y -q "$@" ;;
+    yum)    $SUDO yum install -y -q "$@" ;;
+    # Deliberately NOT `pacman -Sy <pkg>`: refreshing the sync DB without
+    # upgrading resolves dependencies against versions the host doesn't have —
+    # the partial-upgrade state Arch declares unsupported. Adding -u is no better:
+    # it would turn this into an unattended full system upgrade of someone else's
+    # machine. So on Arch we ask rather than act (see the caller).
+    zypper) $SUDO zypper --non-interactive install "$@" ;;
+    apk)    $SUDO apk add --no-cache "$@" ;;
+    *)      return 1 ;;
+  esac
+}
+
+# get.docker.com is Docker's own installer and the method Docker documents, but it
+# only dispatches on a handful of distro IDs — arch, opensuse-*, alpine and
+# almalinux all hit its "Unsupported distribution" exit. Those distros package
+# Docker and the compose plugin themselves, so use that instead of sending the
+# user into an installer that cannot work.
+#
+# Where get.docker.com IS used it is downloaded to a file and the path printed
+# first, never piped into a root shell — the habit this project refuses to teach,
+# and it matters more here than usual because Proxima ends up holding a Proxmox
+# token that is effectively root on your cluster.
+install_docker() {
+  case "$PKG_MGR" in
+    pacman)
+      warn "on Arch, installing packages without a full system upgrade is unsupported."
+      die "Please run:  sudo pacman -Syu docker docker-compose
+  then start it with:  sudo systemctl enable --now docker
+  and run this script again." ;;
+    zypper)
+      $SUDO zypper --non-interactive install docker docker-compose || \
+        die "could not install Docker from the openSUSE repositories."
+      $SUDO systemctl enable --now docker || warn "could not start the docker service (see above)"
+      return 0 ;;
+    apk)
+      $SUDO apk add --no-cache docker docker-cli-compose || \
+        die "could not install Docker from the Alpine repositories."
+      # rc-update, not just rc-service: without it Docker does not survive a reboot
+      # and the stack silently fails to come back.
+      $SUDO rc-update add docker default 2>/dev/null || true
+      $SUDO rc-service docker start || warn "could not start the docker service (see above)"
+      return 0 ;;
+  esac
+
+  case "$DISTRO_ID" in
+    ubuntu|debian|raspbian|centos|fedora|rhel|rocky) : ;;
+    *)
+      die "Docker's official installer does not support '${DISTRO_ID:-this system}'.
+  Install Docker Engine and the Compose v2 plugin from your distribution's
+  repositories, then run this script again:
+      https://docs.docker.com/engine/install/" ;;
+  esac
+
+  local script
+  # The six X's MUST be the final characters: busybox/musl mktemp rejects a
+  # trailing suffix with EINVAL, which under `set -e` would abort the script with
+  # no message at all, right after packages were installed.
+  script="$(mktemp "${TMPDIR:-/tmp}/get-docker.XXXXXX")" \
+    || die "could not create a temporary file in ${TMPDIR:-/tmp}"
+  info "downloading Docker's official installer to $script"
+  if ! curl -fsSL https://get.docker.com -o "$script"; then
+    rm -f "$script"
+    die "could not download https://get.docker.com — check network/DNS, or install
+  Docker yourself: https://docs.docker.com/engine/install/"
+  fi
+  info "running it (you can read it at $script first if you'd rather)"
+  if ! $SUDO sh "$script"; then
+    rm -f "$script"
+    die "Docker's installer failed — its own output is above.
+  Install Docker manually and re-run this script:
+  https://docs.docker.com/engine/install/"
+  fi
+  rm -f "$script"
+
+  # get.docker.com starts and enables the service on systemd distros; on others
+  # (WSL, systemd-less containers, some VMs) it may not be running yet. Keep the
+  # `|| warn` — letting `set -e` abort here would give zero output — but do NOT
+  # discard stderr, or the reason is lost and the user gets a generic message.
+  if have systemctl; then
+    $SUDO systemctl enable --now docker || warn "could not enable/start the docker service (see above) — continuing"
+  elif have rc-service; then
+    $SUDO rc-service docker start || warn "could not start the docker service (see above) — continuing"
+  fi
+}
+
+# Work out what's actually missing before asking for anything.
+MISSING_LABELS=""
+NEED_DOCKER=0
+NEED_COMPOSE=0
+NEED_PKGS=""
+
+if ! have docker; then
+  # Both are listed even though one install brings both, so that anyone who
+  # declines and goes off to do it by hand knows the compose plugin is required
+  # too — installing only the engine is a common and confusing way to get stuck.
+  NEED_DOCKER=1
+  MISSING_LABELS="$MISSING_LABELS
+    Docker engine        runs Proxima's two containers
+    Docker Compose v2    builds and orchestrates them (ships with current Docker)"
+elif ! docker compose version >/dev/null 2>&1; then
+  NEED_COMPOSE=1
+  MISSING_LABELS="$MISSING_LABELS
+    Docker Compose v2    builds and orchestrates them ('docker compose', not 'docker-compose')"
+fi
+
+have git || { NEED_PKGS="$NEED_PKGS git"; MISSING_LABELS="$MISSING_LABELS
+    git                  fetches the Proxima source"; }
+
+have curl || { NEED_PKGS="$NEED_PKGS curl"; MISSING_LABELS="$MISSING_LABELS
+    curl                 downloads what's needed"; }
+
+# Either of these can generate the key; only ask for openssl if neither exists.
+if ! have openssl && ! { [ -r /dev/urandom ] && have od; }; then
+  NEED_PKGS="$NEED_PKGS openssl"
+  MISSING_LABELS="$MISSING_LABELS
+    openssl              generates your ENCRYPTION_KEY"
+fi
+
+if [ -n "$MISSING_LABELS" ]; then
+  echo
+  warn "Proxima needs some things this machine doesn't have yet:"
+  printf '%s\n' "$MISSING_LABELS"
+  echo
+  info "These are required — Proxima is a containerised application and cannot"
+  info "run without them. Nothing here is optional or cosmetic."
+  echo
+
+  if [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ]; then
+    die "installing these needs root, but 'sudo' isn't available and you aren't root.
+  Install them yourself, or re-run this script as root:
+      Docker  → https://docs.docker.com/engine/install/"
+  fi
+  if [ "$NEED_DOCKER" -eq 0 ] && [ -n "$NEED_PKGS" ] && [ -z "$PKG_MGR" ]; then
+    die "couldn't recognise this system's package manager (tried apt, dnf, yum,
+  pacman, zypper, apk). Install these yourself and re-run:$NEED_PKGS"
+  fi
+
+  _agreed=0
+  if [ "$ASSUME_YES" -eq 1 ]; then
+    _agreed=1
+    info "--yes given; installing them."
+  elif [ ! -t 0 ]; then
+    die "these need to be installed, but this isn't an interactive terminal so I
+  can't ask. Re-run with --yes to install them without prompting, or install
+  them yourself first."
+  else
+    while :; do
+      printf '  Install them now? [y/N]: '
+      read -r _ans || _ans=""
+      case "$_ans" in
+        y|Y|yes|YES) _agreed=1; break ;;
+        n|N|no|NO|"") _agreed=0; break ;;
+        *) warn "please answer y or n." ;;
+      esac
+    done
+  fi
+
+  if [ "$_agreed" -ne 1 ]; then
+    echo
+    step "Stopping here"
+    info "Proxima can't be installed without those. Nothing has been changed on"
+    info "this machine — no files written, no packages installed."
+    echo
+    info "Install them yourself and run this script again:"
+    info "    Docker + Compose v2  → https://docs.docker.com/engine/install/"
+    [ -n "$NEED_PKGS" ] && info "   $NEED_PKGS  → your system's package manager"
+    echo
+    exit 1
+  fi
+
+  # `have sudo` only proves the binary exists, not that this user may use it.
+  # Without this check someone outside sudoers consents, watches a package manager
+  # start, and only then discovers they were never allowed — after we have already
+  # said "installing". Ask sudo to authenticate first so the refusal is immediate
+  # and unambiguous. This is also where a password prompt legitimately appears.
+  if [ -n "$SUDO" ]; then
+    if ! sudo -n true 2>/dev/null; then
+      info "these need administrator rights — sudo will ask for your password"
+    fi
+    $SUDO -v || die "sudo is installed, but $RUN_USER isn't authorised to use it on this
+  machine (its reason is above). Ask an administrator to install these, or run
+  this script as root."
+  fi
+
+  echo
+  if [ -n "$NEED_PKGS" ]; then
+    step "Installing:$NEED_PKGS"
+    # Check the OUTCOME, not the exit status. zypper reserves 100-106 for
+    # informational results — 106 means "a repo failed to refresh but the
+    # transaction succeeded" — so trusting the code tells someone their package
+    # failed while they watch it install fine.
+    # shellcheck disable=SC2086
+    pkg_install $NEED_PKGS || true
+    for _p in $NEED_PKGS; do
+      have "$_p" || die "could not install: $_p
+  Its package manager's output is above. Install it yourself and re-run this script."
+    done
+    ok "installed:$NEED_PKGS"
+  fi
+  if [ "$NEED_DOCKER" -eq 1 ] || [ "$NEED_COMPOSE" -eq 1 ]; then
+    step "Installing Docker"
+    install_docker
+    have docker || die "Docker still isn't on PATH after installing. Open a new
+  shell and re-run this script."
+    docker compose version >/dev/null 2>&1 || die \
+      "Docker installed, but Compose v2 is missing. Install the compose plugin:
+  https://docs.docker.com/compose/install/linux/"
+    ok "Docker installed"
+  fi
+fi
+
+# Versions alone don't prove access: a user outside the docker group gets
+# "permission denied" here, which is the most common first-run failure — and it
+# is guaranteed immediately after a fresh install, because group membership only
+# applies to new sessions.
+if ! docker ps >/dev/null 2>&1; then
+  if [ "$(id -u)" -ne 0 ] && [ -n "$SUDO" ] && ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    warn "your user isn't in the 'docker' group yet — adding it"
+    # busybox (Alpine) ships adduser/addgroup, not the shadow suite, so usermod
+    # may not exist. Without this the script dies advising the very command that
+    # just failed with "not found".
+    if _um="$(find_admin_tool usermod)"; then
+      $SUDO "$_um" -aG docker "$RUN_USER" || die "could not add $RUN_USER to the 'docker' group — the reason is above.
+  Do it yourself, start a new session, and re-run this script:
+      sudo usermod -aG docker $RUN_USER"
+    elif _ag="$(find_admin_tool addgroup)"; then
+      $SUDO "$_ag" "$RUN_USER" docker || die "could not add $RUN_USER to the 'docker' group — the reason is above.
+  Do it yourself, start a new session, and re-run this script:
+      sudo addgroup $RUN_USER docker"
+    else
+      die "neither 'usermod' nor 'addgroup' was found, so $RUN_USER cannot be added
+  to the 'docker' group automatically. On Alpine:  sudo apk add shadow
+  Then:  sudo usermod -aG docker $RUN_USER  — and re-run this script."
+    fi
+    # Group membership only takes effect in a new session. Re-exec through `sg`
+    # so this run can continue without making you log out and back in.
+    if have sg && [ -z "${PROXIMA_REEXEC:-}" ]; then
+      ok "added — continuing in a shell that has the new group"
+      export PROXIMA_REEXEC=1
+      # Re-invoke through bash explicitly: $0 is usually a bare relative path
+      # like "install.sh", which is neither executable nor on PATH, so handing
+      # it to `sg -c` directly would just fail with "command not found".
+      # ORIG_ARGV, not "$@" — the parser above already consumed the arguments.
+      exec sg docker -c "bash $(printf '%q ' "$0" ${ORIG_ARGV[@]+"${ORIG_ARGV[@]}"})"
+    fi
+    if have newgrp; then
+      die "added $RUN_USER to the 'docker' group. Log out and back in (or run
+  'newgrp docker'), then run this script again — it will pick up where it left off."
+    fi
+    die "added $RUN_USER to the 'docker' group. Log out and back in, then run this
+  script again — it will pick up where it left off."
+  fi
+  die "cannot talk to the Docker daemon.
+  Is it running?   ${SUDO:+sudo }systemctl start docker"
+fi
+ok "docker daemon reachable"
+ok "docker compose $(docker compose version --short 2>/dev/null || echo v2)"
+
+# Running as root (directly, or via `sudo bash install.sh`) means `docker ps`
+# above succeeded and the whole group-repair branch was skipped — so the human
+# behind the sudo never gets docker access, and afterwards has to prefix every
+# `docker compose logs` with sudo in a directory they may not even be able to
+# read. Add them here instead.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$REAL_USER" != "root" ]; then
+  if ! id -nG "$REAL_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    if _rum="$(find_admin_tool usermod)" && "$_rum" -aG docker "$REAL_USER" 2>/dev/null; then
+      ok "added $REAL_USER to the 'docker' group (takes effect in a new session)"
+    elif _rag="$(find_admin_tool addgroup)" && "$_rag" "$REAL_USER" docker 2>/dev/null; then
+      ok "added $REAL_USER to the 'docker' group (takes effect in a new session)"
+    else
+      warn "couldn't add $REAL_USER to the 'docker' group — they'll need sudo for docker commands"
+    fi
+  fi
+fi
+
+if have openssl; then
+  gen_key() { openssl rand -hex 32; }
+elif [ -r /dev/urandom ] && have od; then
+  gen_key() { od -vAn -N32 -tx1 < /dev/urandom | tr -d ' \n'; }
+else
+  die "need either openssl or /dev/urandom to generate an encryption key."
+fi
+ok "can generate an encryption key"
+
+# The Next.js production build is the memory-hungry step; on a 1 GB box it gets
+# OOM-killed and surfaces as an opaque compose failure.
+if [ -r /proc/meminfo ]; then
+  mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 1900000 ]; then
+    warn "only $((mem_kb / 1024)) MB RAM — the frontend build may be OOM-killed."
+    info "add swap, or build elsewhere and pull the image."
+  fi
+fi
+if have df; then
+  free_kb=$(df -Pk . 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+  if [ "${free_kb:-0}" -gt 0 ] && [ "$free_kb" -lt 5000000 ]; then
+    # Integer division to GB reports "0 GB" for anything under a gigabyte, which
+    # hides exactly the cases worth warning about. Switch units below 1 GB.
+    if [ "$free_kb" -lt 1048576 ]; then
+      warn "only $((free_kb / 1024)) MB free in $(pwd) — images need roughly 5 GB."
+    else
+      warn "only $((free_kb / 1048576)) GB free in $(pwd) — images need roughly 5 GB."
+    fi
+    info "that is this directory's filesystem; pass --dir to install somewhere else."
+  fi
+fi
+
+# ── 2. mode ───────────────────────────────────────────────────────────────────
+primary_ip() {
+  # The address a LAN client would actually reach this host on.
+  if have ip; then
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' && return 0
+  fi
+  if have hostname; then
+    hostname -I 2>/dev/null | awk '{print $1}' && return 0
+  fi
+  return 0
+}
+
+if [ -z "$MODE" ]; then
+  [ "$ASSUME_YES" -eq 1 ] && die "--yes requires --local or --domain."
+  [ -t 0 ] || die "not a terminal; pass --local or --domain <host>."
+  echo
+  step "How will you reach Proxima?"
+  info "1) HTTP on this machine's address — quick trial on a trusted network"
+  info "2) HTTPS on a domain, behind your reverse proxy — real deployment"
+  # A typo should re-ask, not throw away everything typed so far.
+  while :; do
+    printf '  choice [1/2]: '
+    read -r _choice || die "no input."
+    case "$_choice" in
+      1) MODE="local"; break ;;
+      2) MODE="domain"
+         while [ -z "$DOMAIN" ]; do
+           printf '  domain (e.g. proxima.example.com): '
+           read -r DOMAIN || die "no input."
+         done
+         break ;;
+      *) warn "please type 1 or 2." ;;
+    esac
+  done
+fi
+
+if [ "$MODE" = "domain" ]; then
+  validate_domain "$DOMAIN"
+  ORIGIN="https://$DOMAIN"
+else
+  if [ -z "$HTTP_HOST" ]; then
+    HTTP_HOST="$(primary_ip || true)"
+    HTTP_HOST="${HTTP_HOST:-localhost}"
+  fi
+  case "$HTTP_HOST" in
+    *[!a-zA-Z0-9.:-]*) die "--host may only contain letters, digits, dots, colons and hyphens (got: $HTTP_HOST)" ;;
+  esac
+  ORIGIN="http://$HTTP_HOST:3000"
+  API_ORIGIN="http://$HTTP_HOST:4000"
+fi
+
+# ── 3. source tree ────────────────────────────────────────────────────────────
+echo
+step "Getting the Proxima source"
+
+if [ -z "$INSTALL_DIR" ] && [ -f docker-compose.yml ] && [ -d backend ] && [ -d frontend ]; then
+  INSTALL_DIR="$PWD"
+  ADOPTED_CWD=1
+  ok "using the checkout you're standing in: $INSTALL_DIR"
+else
+  INSTALL_DIR="${INSTALL_DIR:-$PWD/proxima}"
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    ok "reusing existing checkout: $INSTALL_DIR"
+  elif [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
+    die "$INSTALL_DIR exists and is not empty. Pass --dir <somewhere-else>."
+  else
+    info "cloning $REPO_URL"
+    git clone --quiet "$REPO_URL" "$INSTALL_DIR" || die "clone failed."
+    # Under `sudo bash install.sh` this would otherwise be root-owned, leaving the
+    # human unable to read their own .env or run the compose commands we print.
+    chown_to_invoker "$INSTALL_DIR"
+    ok "cloned into $INSTALL_DIR"
+  fi
+fi
+
+cd "$INSTALL_DIR"
+[ -f docker-compose.yml ] || die "docker-compose.yml not found in $INSTALL_DIR — wrong directory?"
+
+# Fetch before resolving a ref, or a pin resolves against stale local tags.
+git fetch --tags --quiet 2>/dev/null || warn "could not fetch updates; using the refs already on disk"
+
+# Standing in someone's working copy is their choice — silently detaching HEAD
+# off their branch is not. Only auto-pin a checkout this script created.
+if [ "$ADOPTED_CWD" -eq 1 ] && [ -z "$GIT_REF" ]; then
+  info "leaving your checkout on $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD) (pass --ref to pin)"
+else
+  [ -n "$GIT_REF" ] || GIT_REF="$(git tag --list 'v[0-9]*' --sort=-v:refname 2>/dev/null | head -n1 || true)"
+  if [ -n "$GIT_REF" ]; then
+    # Resolve local refs, then remote-only branches, so --ref main works after a
+    # fresh clone where "main" may exist only as origin/main.
+    target=""
+    if git rev-parse --verify --quiet "refs/tags/$GIT_REF" >/dev/null 2>&1 \
+       || git rev-parse --verify --quiet "$GIT_REF" >/dev/null 2>&1; then
+      target="$GIT_REF"
+    elif git rev-parse --verify --quiet "origin/$GIT_REF" >/dev/null 2>&1; then
+      target="origin/$GIT_REF"
+    else
+      # Never silently install an unintended revision.
+      die "git ref '$GIT_REF' does not exist in $REPO_URL.
+  Available releases:
+$(git tag --list 'v[0-9]*' --sort=-v:refname 2>/dev/null | head -5 | sed 's/^/      /')"
+    fi
+    if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+      warn "local changes present — not checking out $target"
+    else
+      git checkout --quiet "$target" || die "could not check out $target"
+      ok "checked out $GIT_REF"
+    fi
+  fi
+fi
+
+# ── 4. .env ───────────────────────────────────────────────────────────────────
+echo
+step "Writing configuration"
+
+env_value() {
+  # Last assignment wins, matching how docker compose reads the file.
+  grep -E "^[[:space:]]*$1=" .env 2>/dev/null | tail -n1 | sed "s/^[^=]*=//; s/^[\"']//; s/[\"']$//; s/[[:space:]]*$//" || true
+}
+
+if [ -f .env ]; then
+  ok ".env already exists — keeping it (your ENCRYPTION_KEY is preserved)"
+
+  existing_key="$(env_value ENCRYPTION_KEY)"
+  if [ -z "$existing_key" ]; then
+    warn "ENCRYPTION_KEY is empty; generating one"
+    KEY="$(gen_key)"
+    # Temp file in the SAME directory so the rename is atomic and cannot land on
+    # another filesystem. grep exits 1 when it selects no lines (an .env that is
+    # empty, or only the blank key line) — that is the expected case here, so
+    # only a real grep error (2) is fatal.
+    TMP_ENV="$(mktemp .env.XXXXXX)"
+    chmod 600 "$TMP_ENV"
+    { grep -v '^[[:space:]]*ENCRYPTION_KEY=' .env || [ $? -eq 1 ]; } > "$TMP_ENV" \
+      || die "could not read .env"
+    printf 'ENCRYPTION_KEY=%s\n' "$KEY" >> "$TMP_ENV"
+    mv "$TMP_ENV" .env || die "could not update .env"
+    TMP_ENV=""
+    unset KEY
+    ok "filled in a fresh 64-hex ENCRYPTION_KEY"
+  elif ! printf '%s' "$existing_key" | grep -qE '^[0-9a-fA-F]{64}$'; then
+    die "the ENCRYPTION_KEY in .env is not 64 hex characters.
+  The backend fails closed on an invalid key. Fix it in .env, or if this is a
+  fresh install with no data yet, delete .env and re-run to generate a valid one."
+  fi
+
+  # NEXT_PUBLIC_* are frontend BUILD ARGS baked into the bundle. Rebuilding over a
+  # stale .env would serve a UI that calls the OLD origin while step 7 advertises
+  # the new one — and FRONTEND_URL is the backend's CORS allow-list, so it would
+  # reject the new origin too. Neither is fixable after the fact, so stop.
+  have_origin="$(env_value NEXT_PUBLIC_SITE_URL)"
+  have_origin="${have_origin%/}"
+  if [ -n "$have_origin" ] && [ "$have_origin" != "$ORIGIN" ]; then
+    die "this .env is configured for $have_origin, but you asked for $ORIGIN.
+  NEXT_PUBLIC_API_URL / NEXT_PUBLIC_SITE_URL are baked into the frontend at BUILD
+  time and FRONTEND_URL is the backend's CORS allow-list, so rebuilding now would
+  bring up a stack that still talks to $have_origin.
+
+  To move this install to $ORIGIN, edit .env — keeping ENCRYPTION_KEY exactly as
+  it is — and update: FRONTEND_URL, NEXT_PUBLIC_API_URL, NEXT_PUBLIC_SITE_URL,
+  BACKEND_PUBLIC_URL, WEBAUTHN_RP_ID, WEBAUTHN_ORIGIN, COOKIE_SECURE, TRUST_PROXY,
+  CSP_CONNECT_SRC, BIND_ADDR. Then: docker compose up -d --build
+
+  Never let a NEW ENCRYPTION_KEY be generated against an existing database — every
+  stored secret (Proxmox token, SMTP password, TOTP secrets) becomes undecryptable."
+  fi
+
+  # The reuse path never chmodded, so a hand-made .env could be world-readable.
+  chmod 600 .env 2>/dev/null || warn "could not chmod 600 .env — check its permissions"
+else
+  KEY="$(gen_key)"
+  [ "${#KEY}" -eq 64 ] || die "generated key was not 64 hex characters."
+
+  TMP_ENV="$(mktemp .env.XXXXXX)"
+  chmod 600 "$TMP_ENV"
+  if [ "$MODE" = "local" ]; then
+    cat > "$TMP_ENV" <<EOF
+# Generated by install.sh — HTTP trial on $HTTP_HOST.
+# Full reference: .env.docker.example
+ENCRYPTION_KEY=$KEY
+
+FRONTEND_URL=$ORIGIN
+NEXT_PUBLIC_API_URL=$API_ORIGIN/api
+NEXT_PUBLIC_SITE_URL=$ORIGIN
+BACKEND_PUBLIC_URL=$API_ORIGIN
+
+# The UI (:3000) and the API (:4000) are separate origins here, and the shipped
+# production CSP only allows 'self' https: wss: — which would block every API call
+# and the console WebSocket over plain HTTP. Pin connect-src to this API origin.
+# The value MUST be wrapped in double quotes: docker compose ends a value at the
+# closing quote it opened, so a bare  CSP_CONNECT_SRC='self' http://…  is read as
+# just  self  — silently dropping the API origin AND the quotes that make 'self'
+# the CSP keyword rather than a hostname.
+CSP_CONNECT_SRC="'self' $API_ORIGIN ws://$HTTP_HOST:4000"
+
+# Plain HTTP: Secure cookies would never be sent back, so they stay off here.
+COOKIE_SECURE=false
+TRUST_PROXY=0
+# Published on all interfaces so you can reach it from another machine.
+BIND_ADDR=0.0.0.0
+BACKEND_PORT=4000
+FRONTEND_PORT=3000
+EOF
+  else
+    cat > "$TMP_ENV" <<EOF
+# Generated by install.sh — single HTTPS origin behind a reverse proxy.
+# Full reference: .env.docker.example
+ENCRYPTION_KEY=$KEY
+
+FRONTEND_URL=$ORIGIN
+NEXT_PUBLIC_API_URL=$ORIGIN/api
+NEXT_PUBLIC_SITE_URL=$ORIGIN
+BACKEND_PUBLIC_URL=$ORIGIN
+
+# Passkeys are bound to the exact origin the browser sees.
+WEBAUTHN_RP_ID=$DOMAIN
+WEBAUTHN_ORIGIN=$ORIGIN
+
+COOKIE_SECURE=true
+TRUST_PROXY=1
+# Which header carries the real client IP for the audit log and rate limiting.
+# Default is cf-connecting-ip (Cloudflare); a plain Caddy/nginx proxy sends
+# X-Forwarded-For, and trusting the wrong one lets clients spoof their IP.
+REAL_IP_HEADER=x-forwarded-for
+# Only the local reverse proxy reaches the app ports.
+BIND_ADDR=127.0.0.1
+BACKEND_PORT=4000
+FRONTEND_PORT=3000
+EOF
+  fi
+  mv "$TMP_ENV" .env || die "could not write .env"
+  TMP_ENV=""
+  unset KEY
+  # Mode 600 and root-owned would mean the human who ran `sudo bash install.sh`
+  # cannot read the ENCRYPTION_KEY they are told to back up off the host.
+  chown_to_invoker .env
+  ok "wrote .env (mode 600) with a fresh 64-hex ENCRYPTION_KEY"
+  warn "back that key up OFF this host — a database backup without it restores nothing"
+fi
+
+# Compose bind-mounts ${PROXIMA_BACKUP_DIR:-./backups}. If Docker has to create
+# it, it lands root-owned and the scheduled backup (which runs as the unprivileged
+# `node` user) fails at 02:30 with nobody watching.
+backup_dir="$(env_value PROXIMA_BACKUP_DIR)"
+backup_dir="${backup_dir:-./backups}"
+if [ ! -d "$backup_dir" ]; then
+  if mkdir -p "$backup_dir" 2>/dev/null; then
+    # This directory is bind-mounted into the backend, which runs as uid 1000
+    # (`node`). Created by root it lands root-owned and every nightly app-database
+    # backup fails silently — the service warns and returns, the scheduler only
+    # logs successes, and the admin UI shows no last-run status. The container
+    # entrypoint now chowns it too, which covers hand-rolled installs; this hands
+    # it to the invoking human as well so they can read their own snapshots.
+    chown_to_invoker "$backup_dir"
+    ok "created $backup_dir for app-database backups"
+  else
+    warn "could not create $backup_dir — create it yourself before enabling backups"
+  fi
+fi
+
+# Warn on the ports actually in effect, not hardcoded ones.
+be_port="$(env_value BACKEND_PORT)"; be_port="${be_port:-4000}"
+fe_port="$(env_value FRONTEND_PORT)"; fe_port="${fe_port:-3000}"
+if have ss; then
+  for p in "$be_port" "$fe_port"; do
+    ss -ltn 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" \
+      && warn "port $p already has a listener — if that isn't Proxima, change BACKEND_PORT/FRONTEND_PORT in .env"
+  done
+fi
+
+if [ "$DO_START" -eq 0 ]; then
+  echo; step "Done (--no-start)"
+  printf '  start it with:  cd %s && docker compose up -d --build\n' "$(printf '%q' "$INSTALL_DIR")"
+  exit 0
+fi
+
+# ── 5. build + start ──────────────────────────────────────────────────────────
+echo
+step "Building and starting (the first build takes a few minutes)"
+docker compose up -d --build || die "compose failed — see the output above.
+  Most common causes: not enough RAM for the frontend build (add swap), no disk
+  space, or no network access to pull base images."
+
+# ── 6. wait for health ────────────────────────────────────────────────────────
+echo
+step "Waiting for the API to become healthy"
+info "the backend applies database migrations on boot, so this is not instant"
+
+cid=""; healthy=0
+for _ in $(seq 1 60); do
+  [ -n "$cid" ] || cid="$(docker compose ps -q backend 2>/dev/null || true)"
+  if [ -n "$cid" ]; then
+    state="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo unknown)"
+    running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo true)"
+    case "$state" in
+      healthy) healthy=1; break ;;
+    esac
+    # A crash-looping backend reports "starting" forever; check Running too.
+    if [ "$running" = "false" ]; then
+      die "the backend container stopped. See what it said:
+      docker compose logs backend"
+    fi
+  fi
+  sleep 5
+done
+
+# ── 7. what's next ────────────────────────────────────────────────────────────
+echo
+if [ "$healthy" -eq 1 ]; then
+  ok "backend is healthy"
+  step "Proxima is up"
+else
+  warn "the backend did not report healthy within ~5 minutes"
+  step "Proxima started, but is not confirmed healthy"
+  info "check it with:  cd $INSTALL_DIR && docker compose logs -f backend"
+fi
+
+echo
+if [ "$MODE" = "local" ]; then
+  printf '  Open %s%s%s and complete the setup wizard.\n' "$C_BOLD" "$ORIGIN" "$C_RESET"
+  if [ "$HTTP_HOST" = "localhost" ]; then
+    info "that address only works from THIS machine — re-run with --host <lan-ip> for others"
+  fi
+  echo
+  warn "Until you finish the wizard, ANYONE who can reach $ORIGIN can claim the"
+  warn "admin account. The ports are published on all interfaces. Do it now, or"
+  warn "keep this host off untrusted networks until you have."
+else
+  printf '  Point your reverse proxy at this stack, then open %s%s%s\n' "$C_BOLD" "$ORIGIN" "$C_RESET"
+  info "  /api  ->  127.0.0.1:$be_port     (keep the /api prefix — do NOT strip it)"
+  info "  /     ->  127.0.0.1:$fe_port"
+  info "WebSockets must pass through: the console and the IDE both need them."
+  info "A ready-made Caddyfile is in this checkout: $INSTALL_DIR/deploy/Caddyfile"
+  info "Full runbook: https://github.com/conzex/proxima/blob/main/DEPLOYMENT.md"
+fi
+
+echo
+info "The wizard asks for a Proxmox API token. The quickest token that works is:"
+info "    pveum user token add root@pam proxima --privsep 0"
+info "That grants Proxima full cluster rights. For anything you care about, create"
+info "a dedicated least-privilege role instead: https://github.com/conzex/proxima/blob/main/SECURITY.md"
+info "Privilege separation must be OFF either way — a privsep token has NO"
+info "permissions, and the connection test still passes before everything 403s."
+echo
+info "Before inviting anyone: enable the Proxmox cluster firewall."
+info "The per-VM isolation rules do nothing until it is on."
+echo

@@ -1,0 +1,206 @@
+# Proxima Security Model
+
+This document explains how Proxima isolates the people you invite from the rest of
+your infrastructure, what you must do to **enforce** that isolation, and the broader
+security posture of the application.
+
+> **TL;DR** — Proxima gives every VM it creates a restrictive per-VM firewall that
+> blocks the tenant from reaching your LAN, your other VMs, and the Proxmox host
+> (while still allowing the internet). **Those rules only take effect once you enable
+> the Proxmox cluster firewall.** For the strongest isolation, put tenant VMs on a
+> dedicated VLAN/bridge (see [Gold-standard isolation](#gold-standard-isolation)).
+
+---
+
+## 1. The isolation goal
+
+You want to share CPU/RAM/disk with friends and family so they can run their own VMs —
+but they must **never** be able to reach:
+
+- your other virtual machines on the cluster,
+- the Proxmox host / management interface,
+- anything else on your local network (NAS, router admin, IoT, other PCs).
+
+There are two layers to this: **application authorization** (can a tenant see/control
+*another tenant's* VM through Proxima?) and **network isolation** (can a tenant's VM
+reach your infrastructure over the network?).
+
+---
+
+## 2. Application-layer authorization
+
+This is enforced in code and is always on:
+
+- Every per-VM API call resolves the guest through `getVmWithCap(vmId, user, cap)`, which
+  returns it only if the caller holds the **capability** that route requires. A tenant
+  cannot view, start, stop, delete, or open a console to a VM they have no access to.
+- **Share a VM** grants another Proxima user access at one of three preset levels:
+  **Viewer** (see the VM and its status), **Operator** (+ power actions and console), and
+  **Manager** (+ config, resize, backups, IDE). No share level of any kind can delete,
+  rebuild, migrate, re-share, or change passthrough — those stay with the owner and admins.
+- VM listings return the VMs a caller owns **or has been shared** (admins see all), each row
+  annotated with the caller's access level and capability set so the UI can gate controls.
+- **Compute access windows** bound how long an invited person may use the cluster at all.
+  The term is anchored at sign-up (or `never`); when it lapses the account is **suspended,
+  not deleted** — VMs are stopped and every auth path refuses the session, including the
+  console WebSocket, the IDE proxy, and both API-token families. Admins never expire.
+- Resource **quotas** from the invite are enforced on every create; a tenant cannot
+  exceed the CPU/RAM/disk you granted.
+- The Proxmox **API token never leaves the backend** — tenants talk only to Proxima.
+- VM `name`, `os` (ISO filename), and target `node` are strictly validated so a tenant
+  cannot inject extra Proxmox parameters or alter API paths.
+
+---
+
+## 3. Network isolation (the important layer)
+
+By default a Proxmox VM lands on your main bridge (e.g. `vmbr0`), which is your flat LAN —
+**L2-adjacent to everything**. Proxima addresses this in two ways.
+
+### 3a. Per-VM firewall (applied automatically)
+
+When **Tenant network isolation** is enabled (Admin → Settings ▸ Proxmox tab, on by default), every VM
+Proxima creates is configured with:
+
+- `firewall=1` on its network device,
+- guest firewall `enable=1`, `policy_in=DROP` (nothing on the LAN can initiate to the VM),
+  `policy_out=ACCEPT` (further restricted below), `macfilter=1` (the VM can't spoof
+  another machine's MAC), `dhcp=1` (so it can still lease an address), and `ndp=1` (IPv6
+  neighbour discovery, needed for the guest to function on an IPv6-enabled bridge).
+  `ipfilter` is left
+  **off** — turning it on requires registering each VM's DHCP-assigned IP in an
+  `ipfilter-net*` ipset, and without that Proxmox drops *all* of the VM's traffic.
+- outbound firewall rules, evaluated top-to-bottom:
+  1. `ACCEPT` → DNS (port 53) to your configured resolver(s) — or to **any** destination
+     when none are set (see note), so tenant VMs always resolve names,
+  2. `DROP` → `10.0.0.0/8`,
+  3. `DROP` → `172.16.0.0/12`,
+  4. `DROP` → `192.168.0.0/16`,
+  5. (default `ACCEPT` → the public internet).
+
+Net effect: the tenant VM can reach **the internet and DNS**, but **cannot reach any
+RFC1918 address** — that includes your LAN, your other VMs, and the Proxmox host.
+
+> **DNS servers (Admin → Settings → Network isolation).** Your resolver is often *not*
+> your gateway — a Pi-hole/AdGuard box, a dedicated DNS server, or one on a separate
+> VLAN. By default the isolation rules allow DNS to **any** destination so name
+> resolution always works (the rest of RFC1918 stays blocked, so tenants still can't
+> reach any other internal service). To tighten it, list your DNS server IP(s) in the
+> **DNS servers** field and isolation will permit DNS *only* to those.
+
+### 3b. You must enable the Proxmox cluster firewall
+
+> **Per-VM firewall rules do nothing until the Proxmox *cluster* firewall is enabled.**
+> Until then, VMs share your LAN with no isolation.
+
+Admin → Settings shows whether isolation is **Enforced**. If it says *"Not enforced yet,"*
+the cluster firewall is off. Enable it carefully:
+
+**Safe enable (preserves your management access):**
+
+1. Add a datacenter rule allowing your admin network to reach the host, **before** enabling
+   the firewall, so you don't lock yourself out. On the Proxmox host shell:
+   ```bash
+   # allow your LAN admin subnet to the Proxmox web UI + SSH (adjust the CIDR)
+   pvesh create /cluster/firewall/rules -type in -action ACCEPT -source 192.168.50.0/24 -dport 8006 -enable 1 -comment "mgmt web"
+   pvesh create /cluster/firewall/rules -type in -action ACCEPT -source 192.168.50.0/24 -dport 22   -enable 1 -comment "mgmt ssh"
+   ```
+2. Enable the cluster firewall:
+   ```bash
+   pvesh set /cluster/firewall/options -enable 1
+   ```
+   Proxmox automatically permits cluster/corosync traffic between nodes, so quorum is not
+   affected. Verify you still have web/SSH access immediately. To revert: `pvesh set /cluster/firewall/options -enable 0`.
+
+Once enabled, Proxima's per-VM rules are enforced and the Settings page shows **Enforced**.
+
+### Gold-standard isolation
+
+Defense-in-depth beyond the firewall — put tenant VMs on a network that is isolated
+**by construction**, so isolation doesn't depend on per-VM rules:
+
+- **Dedicated VLAN / bridge with no route to your LAN.** Create a separate bridge (e.g.
+  `vmbr1`) on a VLAN that your router NATs straight to the internet but gives **no route**
+  to your management VLAN. Point Proxima's *default network bridge* (Admin → Settings) at it.
+- **Proxmox SDN isolated VNet.** Create an SDN *Simple* zone + VNet with its own subnet and
+  SNAT; tenant VMs get internet via NAT and are L2/L3-isolated from your management network.
+  Set Proxima's default bridge to that VNet.
+
+With either approach, even a misconfigured or disabled per-VM firewall cannot expose your
+infrastructure, because the tenant network is physically/virtually separate.
+
+### Containers
+
+Proxima provisions both **QEMU VMs** and **LXC containers** (containers since v0.4.0). The
+same tenant-isolation model applies to containers — the per-VM firewall, quotas, ownership
+and share capabilities all treat them the same way — and LXC additionally benefits from
+running **unprivileged**. Note that LXC has **no live migration** in the API-only model, so
+the cluster balancer pins containers and node-drain lists them as blockers.
+
+---
+
+## 4. Other security considerations
+
+| Area | Posture |
+|------|---------|
+| Proxmox API token | Stored AES-256-GCM encrypted in the DB; never sent to the browser. **Scope it down** — see below. |
+| Secrets at rest | `proxmox_token_secret`, `jwt_secret`, and the SMTP/SSO secrets are encrypted with `ENCRYPTION_KEY` (AES-256-GCM, random 12-byte IV + auth tag). The key must be a **64-hex (32-byte)** string, and secret operations **fail closed** if it is missing (no static fallback). |
+| Passwords | bcrypt (cost 12). Login runs bcrypt even for unknown emails to prevent timing-based account enumeration. |
+| Sessions / JWT | 24h JWTs with a random `jti`, **verified with a pinned `HS256` algorithm**; every token is backed by a `Session` row, so logout / revocation is server-side. |
+| Personal API tokens | The second auth path, for the public REST API (see [`docs/api.md`](docs/api.md)). Tokens are `pm_` + CSPRNG random; **only an HMAC-SHA256 hash is stored**, so the plaintext is shown once and is unrecoverable. Each token carries its owner's identity and is subject to the same capability checks, quotas, and compute-access-window enforcement as a browser session; owners can revoke individual tokens. |
+| Brute-force lockout | After `AUTH_LOCKOUT_MAX` (default 10) consecutive failed passwords an account is locked for `AUTH_LOCKOUT_MINUTES` (default 15), auto-unlocking. The locked response is identical to a normal failure (no enumeration), and admins are emailed when SMTP is configured. Complements the IP rate limiter (targeted vs. noisy-source protection). |
+| Invites | 32-byte URL-safe random tokens, single-use (claimed atomically), with an expiry. |
+| Input validation | All request bodies validated with Zod; Prisma parameterizes all queries. Request bodies are capped (1 MB). |
+| Transport | Run Proxima behind HTTPS in production (reverse proxy). Set `verifySsl=true` once Proxmox has a valid cert — or keep verification **on** against a private CA via `PROXMOX_CA_CERT_FILE`/`PROXMOX_CA_CERT` (preferred over disabling it). |
+| Browser headers | The frontend sends `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS, and a strict **nonce-based Content-Security-Policy** (`script-src 'self' 'nonce-…' 'strict-dynamic'`) so injected inline scripts can't execute. |
+| CORS | Restricted to `FRONTEND_URL`. |
+| Console tickets | One-time, short-lived Proxmox VNC tickets. The console WebSocket authenticates via the **httpOnly session cookie** (no token in the URL), checks `Origin` against `FRONTEND_URL`, and gates on the **`console` capability** — owner, admin, Operator and Manager shares pass; a Viewer share does not. |
+| Rate limiting | Built-in `express-rate-limit` on `/auth/login`, `/auth/register`, and public token lookups (invite lookup, backup downloads); the setup wizard's mutating steps are throttled too (env-tunable). A separate **write limiter covers all of `/api`**, skipping safe `GET`/`HEAD`/`OPTIONS`, so every mutating request is throttled (default 60 per 60 s per IP, `API_WRITE_RATE_LIMIT_MAX` / `_WINDOW_MS`). Honors `trust proxy`. |
+| Outbound requests (SSRF) | Admin-configured **notification webhooks** and **cloud-image URLs** are validated against a private-address blocklist (loopback, link-local / cloud-metadata `169.254.169.254`, RFC1918, CGNAT, IPv6 ULA / link-local, IPv4-mapped IPv6): shape-checked on save, DNS-resolved and re-checked immediately before the request, and redirects refused. Homelab installs that point at a LAN service can opt in with `ALLOW_PRIVATE_OUTBOUND_URLS=true` (scheme + no-credentials checks always stay enforced). |
+| Metrics endpoint | `GET /metrics` is token-gated; in **production** it returns 404 unless `METRICS_TOKEN` is set — including for localhost, so there is no unauthenticated local scrape. Scrapers send `Authorization: Bearer <token>`. |
+| MFA-setup enforcement | Where an invite required two-step auth, six protected routers (`/api/vms`, `/api/templates`, `/api/admin`, `/api/proxmox`, `/api/users`, `/api/passthrough-requests`) block access until the user has actually enrolled a TOTP or passkey method. |
+| Containers | Both images run with **all Linux capabilities dropped** and `no-new-privileges`; the frontend runs as a non-root user and the backend drops to the unprivileged `node` user after fixing data-volume ownership. |
+| Audit log | VM lifecycle (create/delete/start/stop/restart/restore), auth events, and **account lockouts** are recorded with actor + client IP; admin-viewable at `/admin/audit`. |
+
+### Proxima IDE (in-guest editor + AI agent)
+
+The IDE is the one feature that reaches a guest **over the network** (`guest-ip:8080`) rather
+than out-of-band through the Proxmox API, so it has its own guarantees (full model in
+[`docs/proxima-ide.md`](docs/proxima-ide.md)):
+
+| Area | Posture |
+|------|---------|
+| Editor transport | Reverse-proxied through the backend; every HTTP **and** WebSocket request is resolved through `getVmWithCap(vmId, user, 'ide')` and re-checked against the admin IDE policy. It is capability-gated, not owner-gated: a **Manager** share also holds `ide`, while Viewer and Operator shares do not. The proxy refuses loopback/link-local/metadata targets, so a spoofed guest-reported IP can't point it at the host. |
+| Firewall pinhole | Reaching `code-server` needs one inbound hole in the guest's isolation firewall — added as a **managed, infra-scoped** ACCEPT via the Proxmox firewall API (like the isolation rules), scoped to `ide_ingress_cidr` (a wildcard `0.0.0.0/0` is rejected). The guest keeps `policy_in=DROP`, so **tenant-to-tenant isolation is unchanged** — only Proxima's address can reach the port. |
+| LLM gateway | The in-guest AI agent authenticates with a **per-VM bearer token** (sha-256 hashed at rest) that re-checks ownership + policy live on every call. `resolveModelRoute` is the single allow-list choke point: a tenant can reach only admin-shared models, or their own BYO keys when enabled — never an un-shared model, even by editing the in-guest config. Admin upstream endpoints/keys never leave the server. |
+| BYO-key SSRF | Tenants may only use OpenAI or the fixed preset OpenAI-compatible bases (OpenRouter, Groq) — a free-form custom base URL is **admin-only**. Tenant-supplied endpoints additionally go through the same outbound guard as webhooks (shape-check on save, DNS re-check at forward). Admins are exempt so they can source models from a **LAN** endpoint (e.g. a local Ollama). |
+| Gateway limits | Body-capped (large chat contexts allowed but bounded) and rate-limited **per VM**, so a stolen or runaway token can't flood the upstream. |
+| Base URL | The gateway URL handed to the guest comes from the operator-configured `BACKEND_PUBLIC_URL` and **must be https** — an http URL gets 301'd, which breaks the agent's POST. Since v0.8.0 the configured value wins outright; deriving the scheme from forwarded headers is only a fallback for bare dev setups, having proved unreliable behind a proxy that rewrites `X-Forwarded-Proto`. |
+
+### Recommended: scope the Proxmox API token
+
+Proxima works with a `root@pam` token, but for least privilege create a dedicated user
+(e.g. `proxima@pve`) with only the roles it needs (VM lifecycle, console, storage/audit,
+firewall) on the relevant nodes/pool, and use that token instead. Proxima needs:
+`VM.Allocate`, `VM.Config.*`, `VM.PowerMgmt`, `VM.Console`, `VM.Audit`, `Datastore.Audit`,
+`Datastore.AllocateSpace`, and `Sys.Audit` (+ firewall management for isolation).
+
+> Note: Proxmox API tokens default to **Privilege Separation ON**, which gives the token an
+> empty permission set. Either disable privilege separation on the token or grant it a role
+> explicitly (see the README).
+
+### Production hardening checklist
+
+- [ ] Serve frontend + API over **HTTPS** (reverse proxy / TLS).
+- [ ] Set a strong, persistent `ENCRYPTION_KEY` and back it up (losing it makes encrypted config unreadable).
+- [ ] Enable the **Proxmox cluster firewall** (§3b) — required for tenant isolation.
+- [ ] Prefer a **dedicated tenant VLAN/SDN** (§ Gold-standard).
+- [ ] Use a **least-privilege** Proxmox token, not `root@pam`.
+- [x] **Rate limiting** on login/register/invite is **built in** (`express-rate-limit`). Behind a reverse proxy, set `TRUST_PROXY` to the trusted hop count so it keys on the real client IP.
+- [x] **Per-account brute-force lockout** is built in (env-tunable; admin email alerts when SMTP is set).
+- [x] **Browser security headers + nonce CSP** ship by default; pin `CSP_CONNECT_SRC` to your exact API origin to tighten `connect-src`.
+- [x] **Hardened containers** (cap-drop, no-new-privileges, non-root) ship by default. The backend auto-`chown`s its data volume on start, so existing deployments need no manual migration.
+- [x] **Outbound SSRF guards** on admin webhooks and cloud-image URLs ship by default (set `ALLOW_PRIVATE_OUTBOUND_URLS=true` only if you deliberately target a LAN service).
+- [ ] Set **`METRICS_TOKEN`** if you scrape `/metrics` in production (otherwise it returns 404); or keep the scrape on localhost only.
+- [ ] Prefer a private-CA `PROXMOX_CA_CERT_FILE` over `verifySsl=false` so the API token can't be MITM'd on an untrusted segment.
+- [ ] Keep Proxmox VE patched (guest→host isolation ultimately depends on the hypervisor).

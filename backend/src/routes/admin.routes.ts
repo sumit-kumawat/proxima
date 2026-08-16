@@ -1,0 +1,1154 @@
+import { Router, type Request, type Response } from 'express';
+import { z } from 'zod';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
+import { requireAuth } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/admin.js';
+import { enforceMfaSetup } from '../middleware/mfa.js';
+import { assertPublicHttpUrlShape } from '../lib/url-safety.js';
+import { getConfig, setConfig } from '../services/config.service.js';
+import { testProxmoxConnection, saveDefaults } from '../services/setup.service.js';
+import {
+  isClusterFirewallEnabled,
+  getClusterStats,
+  getNodesHealth,
+  getPlacementDiagnostics,
+  getBridgeNetwork,
+  ipv4NetworkCidr,
+  setClusterFirewall,
+  getDefaultNode,
+  listPciMappings,
+  pveMessage,
+} from '../services/proxmox.service.js';
+import { listAudit, recordAudit } from '../services/audit.service.js';
+import { getUsageByUser } from '../services/resource-history.service.js';
+import { getLiveStats, addLiveFeedSubscriber } from '../services/live-stats.service.js';
+import {
+  listPendingQuotaRequests,
+  approveQuotaRequest,
+  denyQuotaRequest,
+  QuotaRequestError,
+} from '../services/quota-request.service.js';
+import {
+  getBalancerSettings,
+  saveBalancerSettings,
+  computeClusterPlan,
+  runMigrations,
+  planNodeDrain,
+} from '../services/cluster-balancer.service.js';
+import {
+  listPendingPassthroughRequests,
+  beginPassthroughApproval,
+  applyPassthroughApproval,
+  denyPassthroughRequest,
+  detachPassthrough,
+  PassthroughRequestError,
+} from '../services/passthrough-request.service.js';
+import { getOwnedVm } from '../services/vm.service.js';
+import {
+  checkForUpdate,
+  getUpdateStatus,
+  requestUpdate,
+  selfUpdateEnabled,
+  currentVersion,
+  isValidTag,
+} from '../services/update.service.js';
+import { getMailConfig, saveMailConfig, verifyMailConfig, isMailConfigured, sendMail } from '../services/mail.service.js';
+import { announcementEmail } from '../lib/email-templates.js';
+import { unsubscribeToken } from '../services/broadcast-optout.service.js';
+import { getNotifyConfig, saveNotifyConfig, sendTestNotification, NOTIFY_EVENTS } from '../services/notify.service.js';
+import * as sso from '../services/sso.service.js';
+import { getIdeConfig, saveIdeConfig, isValidIngressCidr } from '../services/ide.service.js';
+import { probeIdeReachability } from '../services/ide-provision.service.js';
+import {
+  getAppDbBackupConfig,
+  saveAppDbBackupConfig,
+  runAppDbBackup,
+  isValidBackupDir,
+  explainBackupDirError,
+  DEFAULT_BACKUP_DIR,
+} from '../services/appdb-backup.service.js';
+import { isKioskPinSet, setKioskPin, isValidKioskPin } from '../services/kiosk.service.js';
+import { listLlmKeys, getLlmKeyEndpoint } from '../services/tenant-llm-key.service.js';
+import { probeModels } from '../services/ide-gateway.service.js';
+import { listResetRequests, adminResetPassword } from '../services/password-reset.service.js';
+import { refreshVmIps, getStoragePinningReport } from '../services/vm.service.js';
+import type { AuthRequest } from '../types/index.js';
+import { prisma } from '../lib/prisma.js';
+
+const router = Router();
+
+router.use(requireAuth, requireAdmin, enforceMfaSetup);
+
+// ─── GET /api/admin/audit ─────────────────────────────────────
+// Append-only activity trail (who did what, when). Newest first, paginated.
+
+router.get('/audit', async (req: Request, res: Response) => {
+  const limit = Number(req.query['limit']) || 100;
+  const offset = Number(req.query['offset']) || 0;
+  res.json(await listAudit({ limit, offset }));
+});
+
+// ─── GET /api/admin/settings ──────────────────────────────────
+// Returns current config (never the Proxmox token secret).
+
+router.get('/settings', async (_req: Request, res: Response) => {
+  const [host, tokenId, verifySsl, storage, bridge, isoStorage, backupStorage, rescueIso, templateRefresh] = await Promise.all([
+    getConfig('proxmox_host'),
+    getConfig('proxmox_token_id'),
+    getConfig('proxmox_verify_ssl'),
+    getConfig('default_storage'),
+    getConfig('default_bridge'),
+    getConfig('iso_storage'),
+    getConfig('backup_storage'),
+    getConfig('rescue_iso'),
+    getConfig('template_refresh_enabled'),
+  ]);
+
+  const mail = await getMailConfig();
+  const ssoCfg = await sso.getSsoConfig();
+  res.json({
+    proxmox: { host, tokenId, verifySsl: verifySsl === 'true', hasSecret: !!(await getConfig('proxmox_token_secret')) },
+    defaults: { storage, bridge, isoStorage, backupStorage },
+    rescueIso,
+    templateRefreshEnabled: templateRefresh === 'true',
+    smtp: mail
+      ? { configured: true, host: mail.host, port: mail.port, secure: mail.secure, user: mail.user ?? '', from: mail.from, hasPass: !!mail.pass }
+      : { configured: false },
+    notify: await getNotifyConfig(),
+    sso: ssoCfg
+      ? {
+          configured: true,
+          enabled: ssoCfg.enabled,
+          issuer: ssoCfg.issuer,
+          clientId: ssoCfg.clientId,
+          scopes: ssoCfg.scopes,
+          groupsClaim: ssoCfg.groupsClaim,
+          adminGroup: ssoCfg.adminGroup,
+          allowSignup: ssoCfg.allowSignup,
+          buttonLabel: ssoCfg.buttonLabel,
+          hasSecret: await sso.hasClientSecret(),
+          callbackUrl: sso.callbackUrl(),
+        }
+      : { configured: false, callbackUrl: sso.callbackUrl() },
+    ide: await getIdeConfig(),
+    appdbBackup: {
+      ...(await getAppDbBackupConfig()),
+      // The container-side directory the compose file mounts a host dir onto.
+      // The UI shows this so an admin isn't left guessing which paths are
+      // writable (the #1 confusion: a folder made on the host isn't reachable).
+      mountedDir: DEFAULT_BACKUP_DIR,
+    },
+    kiosk: { pinSet: await isKioskPinSet() },
+  });
+});
+
+// ─── Kiosk mode exit lock ─────────────────────────────────────
+// The exit PIN a kiosk panel requires to leave full-screen mode. Stored hashed;
+// only "is it set" is ever exposed. Empty string clears the lock.
+const KioskSchema = z.object({
+  pin: z.string().max(64).refine((v) => v === '' || isValidKioskPin(v), '4–12 digits (or empty to clear)'),
+});
+
+router.put('/settings/kiosk', async (req: Request, res: Response) => {
+  const parsed = KioskSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await setKioskPin(parsed.data.pin);
+  await recordAudit({
+    action: 'admin.kiosk_config',
+    actor: (req as AuthRequest).user,
+    detail: parsed.data.pin === '' ? 'exit PIN cleared' : 'exit PIN set',
+    req,
+  });
+  res.json({ success: true });
+});
+
+// ─── App-DB backups (Proxima's own database) ─────────────────
+
+const AppDbBackupSchema = z.object({
+  dir: z
+    .string()
+    .max(500)
+    .refine(isValidBackupDir, 'Must be an absolute path (or empty to disable)'),
+  keep: z.number().int().min(1).max(365).default(7),
+});
+
+router.put('/settings/appdb-backup', async (req: Request, res: Response) => {
+  const parsed = AppDbBackupSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  // Reject a directory the container can't actually write to, at SAVE time.
+  // Accepting it silently means the admin only finds out when the nightly job
+  // fails at 02:30 with nobody watching — the failure mode this whole change
+  // exists to remove.
+  const dir = parsed.data.dir.trim();
+  if (dir) {
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+      const probe = path.join(dir, `.proxima-write-test-${process.pid}`);
+      await fsp.writeFile(probe, '');
+      await fsp.unlink(probe);
+    } catch (err) {
+      res.status(400).json({ error: explainBackupDirError(dir, err) });
+      return;
+    }
+  }
+
+  await saveAppDbBackupConfig(parsed.data);
+  await recordAudit({ action: 'admin.appdb_backup_config', actor: (req as AuthRequest).user, req });
+  res.json({ success: true });
+});
+
+// Take a snapshot right now — proves the directory is writable and the whole
+// path works before trusting the nightly schedule with it.
+router.post('/settings/appdb-backup/run', async (req: Request, res: Response) => {
+  try {
+    const r = await runAppDbBackup();
+    if (!r.ran) {
+      res.status(400).json({ ok: false, error: r.reason ?? 'Backup did not run.' });
+      return;
+    }
+    await recordAudit({
+      action: 'admin.appdb_backup_run',
+      actor: (req as AuthRequest).user,
+      detail: r.file,
+      req,
+    });
+    res.json({ ok: true, file: r.file, pruned: r.pruned ?? 0 });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'Backup failed.' });
+  }
+});
+
+// ─── SMTP (email) settings ────────────────────────────────────
+
+const SmtpSchema = z.object({
+  host: z.string().min(1),
+  port: z.number().int().positive().max(65535),
+  secure: z.boolean().default(false),
+  user: z.string().optional(),
+  pass: z.string().optional(), // kept if blank
+  from: z.string().optional(),
+});
+
+router.put('/settings/smtp', async (req: Request, res: Response) => {
+  const parsed = SmtpSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await saveMailConfig(parsed.data);
+  res.json({ success: true });
+});
+
+router.post('/settings/smtp/test', async (_req: Request, res: Response) => {
+  try {
+    res.json(await verifyMailConfig());
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'SMTP test failed' });
+  }
+});
+
+// ─── Event notifications (webhook + email) ────────────────────
+
+const NotifySchema = z.object({
+  webhookUrl: z.string().max(2000).optional(), // blank = webhook disabled
+  emailEnabled: z.boolean().default(false),
+  emailTo: z.string().max(200).optional(), // blank = all admins
+  events: z.array(z.enum(NOTIFY_EVENTS)).default([]),
+});
+
+router.put('/settings/notifications', async (req: Request, res: Response) => {
+  const parsed = NotifySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  const url = (parsed.data.webhookUrl ?? '').trim();
+  if (url) {
+    try {
+      // Reject private/loopback/metadata hosts up front (DNS re-checked at send).
+      assertPublicHttpUrlShape(url, 'Webhook URL');
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid webhook URL' });
+      return;
+    }
+  }
+  await saveNotifyConfig({
+    webhookUrl: url,
+    emailEnabled: parsed.data.emailEnabled,
+    emailTo: parsed.data.emailTo,
+    events: parsed.data.events,
+  });
+  await recordAudit({ action: 'admin.notify_config', actor: (req as AuthRequest).user, req });
+  res.json({ success: true });
+});
+
+router.post('/settings/notifications/test', async (_req: Request, res: Response) => {
+  try {
+    // The test reports per-channel success/failure in the body (200) — a failing
+    // webhook/email is data, not a server error. Returning 5xx here would let the
+    // edge proxy (e.g. Cloudflare) swap the body for its own error page, hiding the
+    // real reason. Only a config error (no channel enabled) is a 400.
+    res.json(await sendTestNotification());
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err instanceof Error ? err.message : 'Test failed' });
+  }
+});
+
+// ─── Proxima IDE settings ────────────────────────────────────
+
+const IdeSharedModelSchema = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(120),
+  provider: z.string().min(1).max(40),
+  model: z.string().min(1).max(120),
+});
+
+// A local model sourced from one of the admin's saved endpoints (a TenantLlmKey).
+const IdeLocalModelSchema = z.object({
+  id: z.string().max(64).optional(), // server-assigned when absent
+  nickname: z.string().max(80).optional(),
+  model: z.string().min(1).max(160),
+  sourceKeyId: z.string().min(1).max(64),
+  visibility: z.enum(['admin', 'shared', 'none']).default('none'),
+});
+
+const IdeSchema = z.object({
+  enabled: z.enum(['off', 'admin', 'tenants']).default('off'),
+  allowByoKeys: z.boolean().default(false),
+  localModels: z.array(IdeLocalModelSchema).max(100).optional(),
+  sharedModels: z.array(IdeSharedModelSchema).max(50).optional(),
+  // The admin's own local-model endpoint — may be a LAN/loopback address (Ollama,
+  // vLLM), so it is deliberately NOT run through the public-URL SSRF shape check.
+  gatewayUrl: z.string().max(2000).optional(),
+  gatewayKey: z.string().max(500).optional(), // kept if blank
+  // The infra source the managed per-VM pinhole admits to the guest IDE port.
+  ingressCidr: z
+    .string()
+    .max(64)
+    .refine(isValidIngressCidr, 'Must be an IPv4 CIDR like 192.168.50.228/32 (or empty to clear)')
+    .optional(),
+});
+
+router.put('/settings/ide', async (req: Request, res: Response) => {
+  const parsed = IdeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await saveIdeConfig(parsed.data);
+  await recordAudit({ action: 'admin.ide_config', actor: (req as AuthRequest).user, req });
+  res.json({ success: true });
+});
+
+// ─── IDE local-model sources (the admin's own saved endpoints) ─
+// GET the admin's saved AI keys (labels only) to populate the "source" dropdown;
+// POST tests one — listing the models reachable at that endpoint for the picker.
+router.get('/ide/sources', async (req: Request, res: Response) => {
+  const user = (req as AuthRequest).user;
+  res.json(await listLlmKeys(user.id));
+});
+
+router.post('/ide/test-source', async (req: Request, res: Response) => {
+  const user = (req as AuthRequest).user;
+  const keyId = typeof req.body?.keyId === 'string' ? req.body.keyId : '';
+  const ep = await getLlmKeyEndpoint(user.id, keyId);
+  if (!ep) {
+    res.status(404).json({ ok: false, error: 'That saved key was not found.' });
+    return;
+  }
+  const probe = await probeModels(ep.baseUrl, ep.apiKey);
+  res.json({ ok: probe.ok, models: probe.models, error: probe.error });
+});
+
+// ─── IDE ingress reachability test ────────────────────────────
+// Dials a guest's IDE port from the backend — the exact path the reverse proxy
+// uses — so a wrong `ide_ingress_cidr` / missing pinhole / broken route shows up
+// here as a described failure instead of a silently-blank IDE for the tenant.
+// Probes the given VM, or the best candidate (an IDE-ready running VM, else any
+// running QEMU VM with a known IP).
+router.post('/ide/test-reachability', async (req: Request, res: Response) => {
+  const vmId = typeof req.body?.vmId === 'string' ? req.body.vmId : '';
+  const vm = vmId
+    ? await prisma.virtualMachine.findUnique({ where: { id: vmId } })
+    : ((await prisma.virtualMachine.findFirst({
+        where: { type: 'qemu', status: 'running', ideState: 'ready', ipAddress: { not: null } },
+        orderBy: { updatedAt: 'desc' },
+      })) ??
+      (await prisma.virtualMachine.findFirst({
+        where: { type: 'qemu', status: 'running', ipAddress: { not: null } },
+        orderBy: { updatedAt: 'desc' },
+      })));
+  if (!vm) {
+    res.status(404).json({
+      ok: false,
+      error: 'No running VM with a known IP to probe — start one (ideally with the IDE installed) and retry.',
+    });
+    return;
+  }
+  const probe = await probeIdeReachability(vm);
+  res.json({ ok: probe.ok, vmName: vm.name, target: probe.target, error: probe.error });
+});
+
+// ─── SSO (OIDC) settings ──────────────────────────────────────
+
+const SsoSchema = z.object({
+  enabled: z.boolean().default(false),
+  issuer: z.string().url('Issuer must be a valid URL'),
+  clientId: z.string().min(1),
+  clientSecret: z.string().optional(), // kept if blank
+  scopes: z.string().optional(),
+  groupsClaim: z.string().optional(),
+  adminGroup: z.string().optional(),
+  allowSignup: z.boolean().optional(),
+  buttonLabel: z.string().optional(),
+});
+
+router.put('/settings/sso', async (req: Request, res: Response) => {
+  const parsed = SsoSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await sso.saveSsoConfig(parsed.data);
+  await recordAudit({ action: 'admin.sso_config', actor: (req as AuthRequest).user, req });
+  res.json({ success: true });
+});
+
+router.post('/settings/sso/test', async (_req: Request, res: Response) => {
+  try {
+    res.json(await sso.verifyDiscovery());
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'SSO discovery failed' });
+  }
+});
+
+// ─── Password reset (no-SMTP fallback) ────────────────────────
+
+router.get('/password-requests', async (_req: Request, res: Response) => {
+  res.json(await listResetRequests());
+});
+
+const AdminResetSchema = z.object({ password: z.string().min(8, 'Password must be at least 8 characters') });
+
+router.post('/users/:id/reset-password', async (req: Request, res: Response) => {
+  const parsed = AdminResetSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  const userId = req.params['id'] as string;
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) { res.status(404).json({ error: 'User not found' }); return; }
+
+  await adminResetPassword(userId, parsed.data.password);
+  await recordAudit({
+    action: 'admin.reset_password', actor: (req as AuthRequest).user,
+    targetType: 'user', targetId: userId, detail: target.email, req,
+  });
+  res.json({ success: true });
+});
+
+// ─── PUT /api/admin/settings/proxmox ──────────────────────────
+// tokenSecret is optional — when omitted/blank, the existing secret is kept.
+
+const ProxmoxUpdateSchema = z.object({
+  host: z.string().url(),
+  tokenId: z.string().min(1),
+  tokenSecret: z.string().optional(),
+  verifySsl: z.boolean().default(true),
+});
+
+router.put('/settings/proxmox', async (req: Request, res: Response) => {
+  const parsed = ProxmoxUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  const { host, tokenId, tokenSecret, verifySsl } = parsed.data;
+
+  await setConfig('proxmox_host', host);
+  await setConfig('proxmox_token_id', tokenId);
+  await setConfig('proxmox_verify_ssl', String(verifySsl));
+  if (tokenSecret && tokenSecret.trim().length > 0) {
+    await setConfig('proxmox_token_secret', tokenSecret, true);
+  }
+
+  res.json({ success: true });
+});
+
+// ─── POST /api/admin/settings/proxmox/test ────────────────────
+
+router.post('/settings/proxmox/test', async (_req: Request, res: Response) => {
+  try {
+    const result = await testProxmoxConnection();
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Connection failed';
+    res.status(502).json({ connected: false, error: msg });
+  }
+});
+
+// ─── PUT /api/admin/settings/defaults ─────────────────────────
+
+const DefaultsSchema = z.object({
+  storage: z.string().min(1),
+  bridge: z.string().min(1),
+  isoStorage: z.string().min(1),
+  // Empty string = clear the override and let the backend auto-pick.
+  backupStorage: z.string().optional(),
+});
+
+router.put('/settings/defaults', async (req: Request, res: Response) => {
+  const parsed = DefaultsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  // Capture the old values first: these decide where every future VM is placed and
+  // whether it can ever be migrated, so "what changed, from what, and who did it"
+  // has to be answerable afterwards. This route previously wrote no audit entry at
+  // all — the only admin route that didn't.
+  const before = {
+    storage: await getConfig('default_storage'),
+    bridge: await getConfig('default_bridge'),
+    isoStorage: await getConfig('iso_storage'),
+    backupStorage: await getConfig('backup_storage'),
+  };
+  await saveDefaults(parsed.data);
+
+  const changes: string[] = [];
+  const note = (label: string, from: string | null, to: string | undefined) => {
+    if (to !== undefined && (from ?? '') !== to) changes.push(`${label}: ${from ?? '(unset)'} → ${to || '(auto)'}`);
+  };
+  note('storage', before.storage, parsed.data.storage);
+  note('bridge', before.bridge, parsed.data.bridge);
+  note('isoStorage', before.isoStorage, parsed.data.isoStorage);
+  note('backupStorage', before.backupStorage, parsed.data.backupStorage);
+
+  await recordAudit({
+    action: 'admin.settings_defaults',
+    actor: (req as AuthRequest).user,
+    detail: changes.length > 0 ? changes.join('; ') : 'saved with no changes',
+    req,
+  });
+  res.json({ success: true });
+});
+
+// ─── PUT /api/admin/settings/rescue ───────────────────────────
+// Designate (or clear) the cluster's rescue ISO — the image "boot into rescue"
+// on the VM Settings tab attaches. Empty string clears it.
+
+const RescueSchema = z.object({ iso: z.string().max(300) });
+
+router.put('/settings/rescue', async (req: Request, res: Response) => {
+  const parsed = RescueSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await setConfig('rescue_iso', parsed.data.iso.trim());
+  res.json({ success: true });
+});
+
+// ─── PUT /api/admin/settings/template-refresh ─────────────────
+// Toggle the monthly cloud-image auto-refresh (rebuilds every refreshable
+// template so new deploys start from a patched base).
+
+const TemplateRefreshSchema = z.object({ enabled: z.boolean() });
+
+router.put('/settings/template-refresh', async (req: Request, res: Response) => {
+  const parsed = TemplateRefreshSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await setConfig('template_refresh_enabled', String(parsed.data.enabled));
+  res.json({ success: true });
+});
+
+// ─── GET /api/admin/cluster-stats ─────────────────────────────
+// Live cluster-wide capacity + usage for the admin/owner dashboard.
+
+router.get('/cluster-stats', async (_req: Request, res: Response) => {
+  try {
+    const diskPool = (await getConfig('default_storage')) ?? undefined;
+    const stats = await getClusterStats(diskPool);
+    res.json(stats);
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/admin/nodes ─────────────────────────────────────
+// Per-node health + cluster quorum (the kiosk command center).
+
+router.get('/nodes', async (_req: Request, res: Response) => {
+  try {
+    res.json(await getNodesHealth());
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/admin/storage-pinning ───────────────────────────
+// Which managed guests cannot migrate, and why. The B-38 fix stops NEW guests
+// inheriting a template's node-local storage; every guest deployed before it is
+// still where it landed, pinned to one node and invisible until someone tries to
+// drain that node. Migratability comes from Proxmox's own preflight, so this cannot
+// disagree with the verdict that actually governs a migration. Read-only: moving a
+// disk is a deliberate human act.
+router.get('/storage-pinning', async (_req: Request, res: Response) => {
+  try {
+    res.json(await getStoragePinningReport());
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/admin/placement-diagnostics ─────────────────────
+// Why auto-placement keeps choosing the node it chooses. Scoring prefers FREE
+// capacity, so a busy node should lose — when it wins anyway, the candidate set
+// handed to the scorer is the culprit (an ISO or disk pool that exists on only
+// one node). This reports that plainly instead of leaving admins to guess.
+router.get('/placement-diagnostics', async (_req: Request, res: Response) => {
+  try {
+    const [isoStorage, diskStorage] = await Promise.all([
+      getConfig('iso_storage'),
+      getConfig('default_storage'),
+    ]);
+    res.json(
+      await getPlacementDiagnostics(isoStorage ?? undefined, diskStorage ?? undefined),
+    );
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── Helper: derive the management subnet from the default bridge ──
+
+async function suggestMgmtCidr(): Promise<string | null> {
+  try {
+    const bridge = await getConfig('default_bridge');
+    if (!bridge) return null;
+    const node = await getDefaultNode();
+    const { cidr } = await getBridgeNetwork(bridge, node);
+    return cidr ? (ipv4NetworkCidr(cidr) ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── GET /api/admin/isolation ─────────────────────────────────
+// Tenant network-isolation status. `enforced` is only true when BOTH Proxima
+// applies per-VM firewall rules AND the Proxmox cluster firewall is enabled.
+
+router.get('/isolation', async (_req: Request, res: Response) => {
+  const isolationEnabled = (await getConfig('isolation_enabled')) !== 'false';
+  let clusterFirewallEnabled = false;
+  let reachable = true;
+  try {
+    clusterFirewallEnabled = await isClusterFirewallEnabled();
+  } catch {
+    reachable = false;
+  }
+  res.json({
+    isolationEnabled,
+    clusterFirewallEnabled,
+    enforced: isolationEnabled && clusterFirewallEnabled,
+    reachable,
+    suggestedMgmtCidr: reachable ? await suggestMgmtCidr() : null,
+    dnsServers: (await getConfig('isolation_dns_servers')) ?? '',
+    vlanTag: (await getConfig('isolation_vlan_tag')) ?? '',
+  });
+});
+
+// ─── PUT /api/admin/isolation ─────────────────────────────────
+
+const IsolationSchema = z.object({
+  enabled: z.boolean(),
+  dnsServers: z.string().optional(),
+  // Empty string clears it. 0 and 4095 are reserved, so the usable range is 1–4094.
+  vlanTag: z
+    .union([z.literal(''), z.coerce.number().int().min(1).max(4094)])
+    .optional(),
+});
+
+router.put('/isolation', async (req: Request, res: Response) => {
+  const parsed = IsolationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  await setConfig('isolation_enabled', String(parsed.data.enabled));
+  // Optional DNS allow-list for the isolation rule-builder. Empty = allow DNS to
+  // any resolver (so tenant VMs always resolve names); set = restrict to these IPs.
+  if (parsed.data.dnsServers !== undefined) {
+    await setConfig('isolation_dns_servers', parsed.data.dnsServers.trim());
+  }
+  // VLAN tag for tenant NICs. This is the control that actually contains L2 attacks —
+  // ARP/DHCP/IPv6-RA poisoning reach every guest sharing a broadcast domain, and no
+  // L3 firewall rule can stop them. Applied on the next isolation run for a guest
+  // (deploy, rebuild, duplicate, restore); existing guests keep their current tag
+  // until then. Empty clears it.
+  if (parsed.data.vlanTag !== undefined) {
+    await setConfig('isolation_vlan_tag', parsed.data.vlanTag === '' ? '' : String(parsed.data.vlanTag));
+  }
+  res.json({ success: true });
+});
+
+// ─── POST /api/admin/isolation/enforce ────────────────────────
+// Safely enable the Proxmox cluster firewall (adds management allow-rules first
+// so the admin isn't locked out). This is what actually *enforces* per-VM isolation.
+
+const EnforceSchema = z.object({ managementCidr: z.string().min(1) });
+
+router.post('/isolation/enforce', async (req: Request, res: Response) => {
+  const parsed = EnforceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    await setClusterFirewall(true, [parsed.data.managementCidr]);
+    res.json({ success: true, enforced: true });
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── DELETE /api/admin/isolation/enforce ──────────────────────
+// Disable the cluster firewall (stops enforcing; management allow-rules are left in place).
+
+router.delete('/isolation/enforce', async (_req: Request, res: Response) => {
+  try {
+    await setClusterFirewall(false);
+    res.json({ success: true, enforced: false });
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/admin/all-vms ───────────────────────────────────
+// Every VM on the cluster, grouped by owner (admin first, then users by
+// signup order). Used by the admin monitor dashboard.
+
+router.get('/all-vms', async (_req: Request, res: Response) => {
+  const users = await prisma.user.findMany({
+    include: { vms: { orderBy: { createdAt: 'desc' } } },
+    orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
+  });
+  // Refresh guest IPs (running VMs) so the owner-grouped list shows live addresses.
+  await refreshVmIps(users.flatMap((u) => u.vms));
+  res.json(
+    users.map((u) => ({
+      id: u.id,
+      email: u.email,
+      displayName: u.displayName,
+      role: u.role,
+      quota: { cpu: u.maxCpu, ram: u.maxRam, storage: u.maxStorage },
+      vms: u.vms,
+    })),
+  );
+});
+
+// ─── GET /api/admin/live-stats ────────────────────────────────
+// Live metrics for ALL guests on the cluster in a single Proxmox call.
+// Returned as a map keyed by proxmoxVmId so the frontend can do O(1) lookups.
+
+router.get('/live-stats', async (_req: Request, res: Response) => {
+  try {
+    res.json(await getLiveStats());
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/admin/live-feed (SSE) ───────────────────────────
+// One server-side poll loop pushes live stats to every subscribed admin client,
+// so the monitor no longer polls once per tab. Clients fall back to /live-stats
+// polling if the stream drops (e.g. an SSE-buffering proxy).
+router.get('/live-feed', (req: Request, res: Response) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+  res.write(': connected\n\n');
+  const unsubscribe = addLiveFeedSubscriber(res);
+  // Attach to both req and res to ensure cleanup even if one side doesn't emit 'close'
+  // (e.g. abrupt socket destroy, proxy buffering, or client disconnect). Idempotent.
+  const cleanup = () => unsubscribe();
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+});
+
+// ─── GET /api/admin/resource-history ──────────────────────────
+// Per-tenant usage aggregates over the last `days` (default 7) — "who consumed
+// what last week". Sampled every 5 min by the scheduler; complements live-stats.
+
+router.get('/resource-history', async (req: Request, res: Response) => {
+  const days = Math.min(Math.max(Number(req.query['days']) || 7, 1), 90);
+  try {
+    res.json({ days, usage: await getUsageByUser(days) });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to load usage history' });
+  }
+});
+
+// ─── Quota-increase requests (admin review) ───────────────────
+
+router.get('/quota-requests', async (_req: Request, res: Response) => {
+  res.json(await listPendingQuotaRequests());
+});
+
+router.post('/quota-requests/:id/approve', async (req: Request, res: Response) => {
+  try {
+    const r = await approveQuotaRequest(req.params['id'] as string, (req as AuthRequest).user.id);
+    await recordAudit({
+      action: 'quota.approve',
+      actor: (req as AuthRequest).user,
+      targetType: 'user',
+      detail: `${r.email}: ${r.cpu} vCPU / ${r.ram} MB / ${r.storage} GB`,
+      req,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof QuotaRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to approve request' });
+  }
+});
+
+router.post('/quota-requests/:id/deny', async (req: Request, res: Response) => {
+  try {
+    const r = await denyQuotaRequest(req.params['id'] as string, (req as AuthRequest).user.id);
+    await recordAudit({ action: 'quota.deny', actor: (req as AuthRequest).user, targetType: 'user', detail: r.email, req });
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof QuotaRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to deny request' });
+  }
+});
+
+// ─── GPU / PCI passthrough (admin review + attach) ─────────────
+// Admin-defined resource mappings are the only devices a tenant can get; the
+// admin picks one to attach. Host VFIO/IOMMU + defining the mapping is manual.
+
+router.get('/pci-mappings', async (_req: Request, res: Response) => {
+  try {
+    res.json(await listPciMappings());
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+router.get('/passthrough-requests', async (_req: Request, res: Response) => {
+  res.json(await listPendingPassthroughRequests());
+});
+
+const ApprovePassthroughSchema = z.object({
+  // Mapping names go into the VM config value — keep them to a safe charset.
+  mapping: z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid mapping name'),
+});
+
+router.post('/passthrough-requests/:id/approve', async (req: Request, res: Response) => {
+  const parsed = ApprovePassthroughSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Choose a PCI mapping to attach.' }); return; }
+  const user = (req as AuthRequest).user;
+  const id = req.params['id'] as string;
+  try {
+    // Validate + plan synchronously (fast), then apply in the background: the
+    // apply may stop the VM and offline-migrate it to the device's node —
+    // minutes of disk copy an edge proxy would time out on. Progress lands on
+    // the request row (applyState) for the admin UI to poll; the worker writes
+    // the completion/failure audit entries.
+    const plan = await beginPassthroughApproval(id, parsed.data.mapping);
+    void applyPassthroughApproval(id, user.id).catch((err) =>
+      console.error('[passthrough] apply failed:', err),
+    );
+    await recordAudit({
+      action: 'passthrough.approve_started',
+      actor: user,
+      targetType: 'vm',
+      detail:
+        `${plan.vmName} ← mapping ${parsed.data.mapping}` +
+        (plan.willMigrate
+          ? ` (will migrate ${plan.sourceNode} → ${plan.targetNode}${plan.targetstorage ? `, disks → ${plan.targetstorage}` : ''})`
+          : ` (already on ${plan.targetNode})`),
+      req,
+    });
+    res.status(202).json({
+      started: true,
+      targetNode: plan.targetNode,
+      willMigrate: plan.willMigrate,
+      targetstorage: plan.targetstorage ?? null,
+      bootWarnings: plan.bootWarnings,
+    });
+  } catch (err) {
+    if (err instanceof PassthroughRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+router.post('/passthrough-requests/:id/deny', async (req: Request, res: Response) => {
+  try {
+    const r = await denyPassthroughRequest(req.params['id'] as string, (req as AuthRequest).user.id);
+    await recordAudit({ action: 'passthrough.deny', actor: (req as AuthRequest).user, targetType: 'vm', detail: r.vmName, req });
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof PassthroughRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to deny request' });
+  }
+});
+
+const DetachPassthroughSchema = z.object({ index: z.number().int().min(0).max(15).optional() });
+
+router.post('/vms/:id/passthrough/detach', async (req: Request, res: Response) => {
+  const parsed = DetachPassthroughSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: 'Invalid device index.' }); return; }
+  const vm = await getOwnedVm(req.params['id'] as string, (req as AuthRequest).user);
+  if (!vm) { res.status(404).json({ error: 'VM not found' }); return; }
+  try {
+    const index = parsed.data.index ?? 0;
+    await detachPassthrough(vm, index);
+    await recordAudit({
+      action: 'passthrough.detach',
+      actor: (req as AuthRequest).user,
+      targetType: 'vm',
+      targetId: vm.id,
+      detail: `${vm.name} hostpci${index}`,
+      req,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof PassthroughRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── POST /api/admin/broadcast ────────────────────────────────
+// Email a maintenance / downtime / general announcement to every user. Sent
+// best-effort per recipient; returns a structured 200 result (not a 5xx an
+// upstream proxy could swallow) so the admin sees exactly how many were reached.
+
+const BroadcastSchema = z.object({
+  subject: z.string().trim().min(1).max(200),
+  message: z.string().trim().min(1).max(5000),
+});
+
+router.post('/broadcast', async (req: Request, res: Response) => {
+  const parsed = BroadcastSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Enter a subject and a message.' });
+    return;
+  }
+  if (!(await isMailConfigured())) {
+    res.status(400).json({ error: 'SMTP is not configured — set up email in Settings first.' });
+    return;
+  }
+
+  // Community Edition: honor each user's broadcast opt-out (Security → Email
+  // preferences, or the unsubscribe link in a previous broadcast). Transactional
+  // and notification emails are unaffected by this flag.
+  const [users, skipped] = await Promise.all([
+    prisma.user.findMany({ where: { broadcastOptOut: false }, select: { id: true, email: true } }),
+    prisma.user.count({ where: { broadcastOptOut: true } }),
+  ]);
+
+  // Per-recipient unsubscribe link (in prod the frontend origin also serves /api).
+  const appUrl = ((await getConfig('frontend_url')) ?? process.env['BACKEND_PUBLIC_URL'] ?? process.env['FRONTEND_URL'] ?? '')
+    .replace(/\/+$/, '');
+  const results = await Promise.allSettled(
+    users.map((u) => {
+      const unsubscribeUrl = appUrl
+        ? `${appUrl}/api/broadcast/unsubscribe?token=${unsubscribeToken(u.id)}`
+        : undefined;
+      const mail = announcementEmail(parsed.data.subject, parsed.data.message, unsubscribeUrl);
+      return sendMail({ to: u.email, ...mail });
+    }),
+  );
+  const sent = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.length - sent;
+
+  await recordAudit({
+    action: 'admin.broadcast',
+    actor: (req as AuthRequest).user,
+    detail: `"${parsed.data.subject}" → ${sent}/${results.length} delivered${skipped ? `, ${skipped} opted out` : ''}`,
+    req,
+  });
+  res.json({ ok: failed === 0, sent, failed, total: results.length, skipped });
+});
+
+// ─── Cluster Balancer (DRS-style workload balancing) ──────────
+// Reads node memory load and recommends/applies live migrations to even it out.
+// GET returns the current settings + a freshly computed plan (recommendations).
+
+router.get('/balancer', async (_req: Request, res: Response) => {
+  try {
+    const settings = await getBalancerSettings();
+    const plan = await computeClusterPlan(settings);
+    res.json({ settings, plan });
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+const BalancerSettingsSchema = z.object({
+  mode: z.enum(['off', 'recommend', 'auto']),
+  thresholdPct: z.number().int().min(5).max(50),
+  maxMoves: z.number().int().min(1).max(20),
+  exclude: z.array(z.number().int().positive()).max(500).default([]),
+});
+
+router.put('/balancer', async (req: Request, res: Response) => {
+  const parsed = BalancerSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  const settings = await saveBalancerSettings(parsed.data);
+  await recordAudit({
+    action: 'balancer.settings',
+    actor: (req as AuthRequest).user,
+    detail: `mode=${settings.mode} threshold=${settings.thresholdPct}% maxMoves=${settings.maxMoves}`,
+    req,
+  });
+  // Return a fresh plan with the new settings; if Proxmox is briefly unreachable
+  // the settings still saved, so surface that as data rather than failing the save.
+  try {
+    res.json({ settings, plan: await computeClusterPlan(settings) });
+  } catch (err) {
+    res.json({ settings, plan: null, error: pveMessage(err) });
+  }
+});
+
+const BalancerApplySchema = z.object({
+  moves: z
+    .array(
+      z.object({
+        vmId: z.string().min(1),
+        toNode: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name'),
+      }),
+    )
+    .min(1)
+    .max(50),
+});
+
+router.post('/balancer/apply', async (req: Request, res: Response) => {
+  const parsed = BalancerApplySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Select at least one migration to apply.' });
+    return;
+  }
+  const user = (req as AuthRequest).user;
+  // Each migration can take minutes (live moves especially), so run them in the
+  // background instead of blocking the request (which an edge proxy could time
+  // out). Progress is visible on the Monitor and in the audit log; the Balancer
+  // page refetches its plan to show the settled placement.
+  void runMigrations(parsed.data.moves, user).catch((err) =>
+    console.error('[balancer] apply failed:', err),
+  );
+  await recordAudit({
+    action: 'balancer.apply',
+    actor: user,
+    detail: `${parsed.data.moves.length} migration(s) queued`,
+    req,
+  });
+  res.status(202).json({ started: parsed.data.moves.length });
+});
+
+// ─── Maintenance: node drain ──────────────────────────────────
+// Plan the evacuation of a node before maintenance — move every managed guest
+// off it, either auto-placed on best-fit nodes or all onto one chosen target.
+// Apply reuses POST /balancer/apply with the returned moves.
+
+const DrainSchema = z.object({
+  node: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name'),
+  targetNode: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name').optional(),
+});
+
+router.post('/balancer/drain', async (req: Request, res: Response) => {
+  const parsed = DrainSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Choose a node to drain.' });
+    return;
+  }
+  try {
+    res.json(await planNodeDrain(parsed.data.node, parsed.data.targetNode));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : pveMessage(err);
+    res.status(/no such node|different target/i.test(msg) ? 400 : 502).json({ error: msg });
+  }
+});
+
+// ─── Updates ──────────────────────────────────────────────────
+// Check GitHub Releases for a newer version, surface what's new, and (opt-in)
+// hand a one-click apply off to the host-side updater. See update.service.ts.
+
+router.get('/updates/check', async (req: Request, res: Response) => {
+  const force = req.query['force'] === 'true';
+  try {
+    res.json(await checkForUpdate(force));
+  } catch {
+    res.status(502).json({ error: 'Could not reach GitHub to check for updates. Try again shortly.' });
+  }
+});
+
+router.get('/updates/status', async (_req: Request, res: Response) => {
+  res.json({ enabled: selfUpdateEnabled(), current: currentVersion(), ...(await getUpdateStatus()) });
+});
+
+const ApplyUpdateSchema = z.object({ tag: z.string().min(1).max(64) });
+
+router.post('/updates/apply', async (req: Request, res: Response) => {
+  if (!selfUpdateEnabled()) {
+    res.status(409).json({
+      code: 'not_enabled',
+      error:
+        'One-click updates are not enabled on this server. Set up the host updater (deploy/update.sh) ' +
+        'and set SELF_UPDATE_ENABLED=true, or update manually.',
+    });
+    return;
+  }
+  const parsed = ApplyUpdateSchema.safeParse(req.body);
+  if (!parsed.success || !isValidTag(parsed.data.tag)) {
+    res.status(400).json({ error: 'Invalid release tag.' });
+    return;
+  }
+  const user = (req as AuthRequest).user;
+  try {
+    await requestUpdate(parsed.data.tag, user.email);
+    await recordAudit({
+      action: 'admin.update_requested', actor: user, targetType: 'system', targetId: parsed.data.tag,
+      detail: `requested update to ${parsed.data.tag}`, req,
+    });
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Could not queue the update — the control directory may be unwritable.' });
+  }
+});
+
+export default router;

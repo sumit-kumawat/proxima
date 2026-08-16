@@ -1,0 +1,8 @@
+{
+  "name": "proxima",
+  "private": true,
+  "dependencies": {
+    "express-rate-limit": "^8.5.2",
+    "puppeteer-core": "^23.11.1"
+  }
+}

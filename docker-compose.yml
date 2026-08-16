@@ -1,0 +1,167 @@
+name: proxima
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: proxima-backend
+    restart: unless-stopped
+    # Hardening: drop all Linux capabilities, then add back only the few the
+    # entrypoint needs. docker-entrypoint.sh starts as root to make the
+    # (root-owned) data volume writable by the unprivileged `node` user —
+    # `chown -R node:node /data` (CHOWN, plus DAC_OVERRIDE to traverse) — then
+    # `su-exec node:node` (SETUID/SETGID) drops to it. Without these the chown
+    # fails ("Operation not permitted") and the backend crash-loops. They are
+    # used only during the brief root phase; once it re-execs as `node`, the
+    # process holds no capabilities. Also block setuid-binary privilege escalation.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORT: "4000"
+      NODE_ENV: production
+      # SQLite lives on the named volume so data survives container rebuilds.
+      DATABASE_URL: file:/data/proxima.db
+      # Where app-database snapshots are written INSIDE the container. Paired
+      # with the ${PROXIMA_BACKUP_DIR} mount below; change the host side there,
+      # not here. Used as the default for the in-app setting.
+      APPDB_BACKUP_DIR: /var/backups/proxima
+      # Used for the CORS allow-list — set to your public frontend origin.
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # REQUIRED and must be stable across restarts (losing it makes stored
+      # secrets unreadable). Generate once with: openssl rand -hex 32
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env (openssl rand -hex 32)}
+      # Send Secure cookies (HTTPS only). MUST be "true" in production — passkeys
+      # and SameSite cookies require a secure context.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Number of reverse-proxy hops in front of the API, so the real client IP
+      # is used for rate-limiting + audit. 1 when behind a single proxy (Caddy/nginx).
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      # Header carrying the real client IP for the audit log. Unset defaults to
+      # "cf-connecting-ip" (Cloudflare); behind a plain Caddy/nginx proxy set
+      # REAL_IP_HEADER=x-forwarded-for in .env. Deliberately `-` not `:-`: an
+      # explicitly-EMPTY value must pass through (it means "disable, use the raw
+      # socket IP"); only a fully unset var takes the Cloudflare default.
+      REAL_IP_HEADER: ${REAL_IP_HEADER-cf-connecting-ip}
+      # Public base URL of the API — used to build the SSO (OIDC) callback URL
+      # (${BACKEND_PUBLIC_URL}/api/auth/sso/callback). Set to your public origin.
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-http://localhost:4000}
+      # WebAuthn (passkey) relying-party. Default to the FRONTEND_URL host; set
+      # explicitly in production. RP ID = registrable domain (no scheme/port),
+      # ORIGIN = the full https:// origin the browser sees.
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
+      # Optional auth rate-limit tuning (defaults: 20 req / 15 min / IP).
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
+      AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
+      # Per-account brute-force lockout (defaults: 10 failed logins → 15 min
+      # auto-unlock). Admins are emailed on lockout when SMTP is configured.
+      AUTH_LOCKOUT_MAX: ${AUTH_LOCKOUT_MAX:-10}
+      AUTH_LOCKOUT_MINUTES: ${AUTH_LOCKOUT_MINUTES:-15}
+      # Keep Proxmox TLS verification ON against a PRIVATE CA instead of disabling
+      # it: mount the CA PEM (see volumes) and point this at it.
+      PROXMOX_CA_CERT_FILE: ${PROXMOX_CA_CERT_FILE:-}
+      # Which GitHub repo the in-app "Check for updates" reads releases from.
+      UPDATE_REPO: ${UPDATE_REPO:-conzex/proxima}
+      # ── Opt-in one-click self-update ──
+      # The admin "Install update" button only works when this is "true" AND the
+      # host updater (deploy/update.sh + the systemd path unit) is installed.
+      # When enabled, also mount the control dir below. See DEPLOYMENT.md.
+      SELF_UPDATE_ENABLED: ${SELF_UPDATE_ENABLED:-false}
+      # /metrics auth: in production the endpoint returns 404 unless this is set;
+      # scrapers must send `Authorization: Bearer <token>`.
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # Opt-in: allow admin-configured webhooks / cloud-image mirrors on private
+      # LAN addresses (SSRF guard escape hatch). Off by default.
+      ALLOW_PRIVATE_OUTBOUND_URLS: ${ALLOW_PRIVATE_OUTBOUND_URLS:-false}
+      # Let Proxima WRITE cloud-init "extras" snippets on demand instead of an
+      # admin pre-placing every combination. SNIPPET_DIR must ALSO be mounted in
+      # (see volumes) — it's a path inside the container, on a shared Proxmox
+      # storage's snippets/ dir; SNIPPET_STORAGE is that storage's id.
+      SNIPPET_DIR: ${SNIPPET_DIR:-}
+      SNIPPET_STORAGE: ${SNIPPET_STORAGE:-}
+      # Let tenants download a guest backup through the browser. Like the snippet
+      # dir this is a CONTAINER path and must be mounted in (see volumes).
+      BACKUP_DOWNLOAD_DIR: ${BACKUP_DOWNLOAD_DIR:-}
+      # Cap on a restore-from-upload (GB). Unset uses the built-in default.
+      RESTORE_UPLOAD_MAX_GB: ${RESTORE_UPLOAD_MAX_GB:-}
+      # Schedule overrides for the background jobs (5-field cron). Unset uses the
+      # defaults: guest backups Sundays 03:00, access-expiry sweep hourly at :20.
+      MATESTATE_CRON: ${MATESTATE_CRON:-}
+      ACCESS_EXPIRY_CRON: ${ACCESS_EXPIRY_CRON:-}
+    # Report healthy only once /api/health passes (DB reachable + migrations run),
+    # so the frontend can wait for a genuinely-ready backend (see depends_on below).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    volumes:
+      - proxima-data:/data
+      # App-database backups (Settings -> Maintenance). Proxima runs in a
+      # container, so it can only write to paths mounted in from the host —
+      # creating a folder on the host alone does nothing. The container-side
+      # path is fixed; PROXIMA_BACKUP_DIR in .env chooses where on the HOST the
+      # snapshots actually land (default: ./backups next to this file).
+      - ${PROXIMA_BACKUP_DIR:-./backups}:/var/backups/proxima
+      # Uncomment to enable on-demand cloud-init snippet writing. The host side
+      # must be the snippets/ dir of a SHARED Proxmox storage; keep the container
+      # path in step with SNIPPET_DIR above.
+      # - /mnt/pve/shared/snippets:/snippets
+      # Uncomment to let tenants download guest backups (match BACKUP_DOWNLOAD_DIR):
+      # - /mnt/pve/backups/dump:/backups:ro
+      # Uncomment to enable one-click updates (the host updater watches this dir):
+      # - ./deploy/update-control:/control
+      # Uncomment to trust a private Proxmox CA (set PROXMOX_CA_CERT_FILE=/certs/pve-ca.pem):
+      # - ./deploy/pve-ca.pem:/certs/pve-ca.pem:ro
+    ports:
+      # Bind to 127.0.0.1 in production (BIND_ADDR=127.0.0.1) so only the local
+      # reverse proxy can reach the API; default 0.0.0.0 for simple/dev use.
+      - "${BIND_ADDR:-0.0.0.0}:${BACKEND_PORT:-4000}:4000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle at build time — must be the API URL the
+        # user's browser can reach (e.g. https://proxima.example.com/api).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api}
+        # Public origin for SEO metadata (OG image / canonical / manifest URLs).
+        # Must be the externally reachable URL link-preview bots can fetch.
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+    image: proxima-frontend
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Optional: pin the CSP connect-src to your exact API + WebSocket origin,
+      # e.g. "'self' https://proxima.example.com wss://proxima.example.com".
+      # Blank = a safe default ('self' https: wss:). See frontend/src/proxy.ts.
+      # In .env this value MUST be wrapped in double quotes, or compose stops
+      # reading at the first closing single quote and you get just `self`.
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-}
+      # Also passed at runtime for parity with the build arg above. Be aware Next
+      # INLINES NEXT_PUBLIC_* at build time, so server code reads the value that
+      # was baked into the image, not this one — changing it here without a
+      # rebuild has no effect. Kept because it costs nothing and keeps `docker
+      # compose config` honest about the intended origin.
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+    depends_on:
+      backend:
+        # Wait for the backend to be healthy (migrated + DB up), not just started,
+        # so the UI never comes up against an unmigrated/booting API.
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  proxima-data:

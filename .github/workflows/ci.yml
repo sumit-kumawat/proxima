@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    # Run on all *branch* pushes but not on tags. Filtering on `branches` (rather
+    # than `tags-ignore`) is what actually excludes tags: in GitHub Actions, a
+    # `push` trigger that specifies only tag filters stops firing on branch pushes
+    # altogether. release.yml handles tag pushes, and the merge-commit run already
+    # validated the exact code a release tag points at — so re-running the full CI
+    # on the tag was redundant work that gave transient flakes a second chance.
+    branches:
+      - "**"
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit + integration tests
+        run: npm test
+      # Proves the module seam's data half for real: core migrations, then the sample
+      # module's own migrations, into the SAME database. `migrate status` exits non-zero
+      # unless each set is recorded as applied, so a module migration silently skipped by
+      # a name collision with a core one fails here instead of in production.
+      - name: Module seam - sample module migrates into the same database
+        env:
+          DATABASE_URL: "file:/tmp/proxima-module-smoke.db"
+          PROXIMA_MODULES: example
+        run: |
+          npx prisma migrate deploy
+          npm run db:migrate:modules
+          npx prisma migrate status --schema prisma/modules/example/schema.prisma
+          npx prisma migrate status
+
+  frontend:
+    name: Frontend — lint + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Console/API URL is resolved against window.location at runtime; this is
+      # only the build-time default. Keep it relative so the build is portable.
+      NEXT_PUBLIC_API_URL: /api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests (Vitest)
+        run: npm test
+      - name: Build (Next 16 / Turbopack — also typechecks)
+        run: npm run build
+
+  e2e:
+    name: Frontend — Playwright smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_PUBLIC_API_URL: /api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Install Playwright Chromium
+        # Retry the browser download: it pulls from external mirrors (e.g. Google's
+        # apt repo) that occasionally serve a mid-sync file ("unexpected size"), a
+        # transient infra flake unrelated to the code under test.
+        run: |
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::Playwright browser install failed (attempt $attempt/3); retrying in 15s…"
+            sleep 15
+          done
+          echo "::error::Playwright browser install failed after 3 attempts"
+          exit 1
+      - name: Run smoke tests
+        run: npm run e2e
+
+  docker:
+    name: Docker — build both images
+    runs-on: ubuntu-latest
+    # Build cache is WRITTEN only from main; every other ref reads it.
+    #
+    # `mode=max` exports every intermediate layer of both images. Writing that
+    # from every branch and every PR filled the 10 GB repo cache quota (376
+    # entries / 10.59 GB), at which point buildx starts failing outright with
+    #     error writing layer blob: failed to reserve cache
+    # and the whole job goes red on code that is perfectly fine. Two runs of the
+    # same commit (the merge push and the PR) also raced each other for the same
+    # blobs, because the concurrency group is keyed on github.ref and so does not
+    # span them.
+    #
+    # Reading stays on for everyone, so PRs keep the full cache speed-up; only
+    # the writing is narrowed. main is the right writer: it is the ref every
+    # branch is cut from, so its layers are the ones most likely to hit.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: false
+          build-args: |
+            NEXT_PUBLIC_API_URL=/api
+          cache-from: type=gha
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}

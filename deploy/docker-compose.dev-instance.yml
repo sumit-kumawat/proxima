@@ -1,0 +1,124 @@
+# Proxima dev instance — a SECOND, isolated Proxima on a host that already
+# runs a production one. Used to exercise unreleased code against a real Proxmox
+# cluster without touching the live deployment.
+#
+#   docker compose -f deploy/docker-compose.dev-instance.yml --env-file .env.dev-instance up -d --build
+#
+# THE THREE THINGS THAT KEEP IT SEPARATE — do not "simplify" any of them:
+#
+#   1. `name: proxima-dev` (below). Compose derives volume names from the project
+#      name, so production's `proxima_proxima-data` becomes `proxima-dev_proxima-data`.
+#      Reuse the name `proxima` and this container attaches the PRODUCTION VOLUME and
+#      runs against the LIVE DATABASE. That is the single most destructive mistake
+#      available here, and it fails silently — it looks like it is working.
+#   2. Different host ports (3200/4100 vs production's 3100/4000).
+#   3. A different ENCRYPTION_KEY, so the two instances cannot read each other's
+#      stored secrets even by accident.
+#
+# NOT FOR PRODUCTION USE. No public ingress: both ports bind to 127.0.0.1 and are
+# reached over Tailscale or an SSH tunnel. It runs unreleased code by definition.
+
+name: proxima-dev
+
+services:
+  backend:
+    build:
+      context: ../backend
+    image: proxima-backend-dev
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORT: "4000"
+      NODE_ENV: production
+      DATABASE_URL: file:/data/proxima.db
+      FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:3200}
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-http://127.0.0.1:4100}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env.dev-instance — MUST differ from production}
+      # Plain HTTP over a tunnel, so Secure cookies would never be sent back.
+      COOKIE_SECURE: "false"
+      # Nothing in front of it — trust no forwarding headers, and read the real
+      # socket IP rather than a header a proxy would have set.
+      TRUST_PROXY: "0"
+      REAL_IP_HEADER: ""
+      # ── Scheduler quietened ───────────────────────────────────────────────
+      # Belt and braces. This instance starts with an EMPTY database, so every
+      # job that iterates "my VMs" is already a no-op — but an empty DB is a
+      # property of the moment, not a guarantee, and the cluster balancer reads
+      # cluster-wide state. Annual at midnight on 1 January: effectively never
+      # for a disposable testbed. Remove deliberately if a scheduled path is
+      # what you are testing.
+      #
+      # DO NOT express "never" as an unreachable date like "0 0 31 2 *".
+      # node-cron resolves the next occurrence at schedule() time and THROWS
+      # "Could not find next matching date within reasonable time range", which
+      # crash-loops the backend at startup — while the frontend comes up fine,
+      # so the stack looks half-alive rather than broken. Learned the hard way.
+      MATESTATE_CRON: "0 0 1 1 *"
+      ACCESS_EXPIRY_CRON: "0 0 1 1 *"
+      APPDB_BACKUP_CRON: "0 0 1 1 *"
+      BALANCER_CRON: "0 0 1 1 *"
+      TEMPLATE_REFRESH_CRON: "0 0 1 1 *"
+      # On-demand cloud-init snippet writing. SNIPPET_DIR is the path INSIDE this
+      # container; SNIPPET_STORAGE is the Proxmox storage that serves the same
+      # directory — they must be two views of one place, or Proxima will write a
+      # snippet Proxmox cannot see. Both unset = the feature is simply off, and the
+      # cloud-image builder then skips the guest-agent bake instead of failing.
+      SNIPPET_DIR: ${SNIPPET_DIR:-}
+      SNIPPET_STORAGE: ${SNIPPET_STORAGE:-}
+      # Comma-separated module names to enable (see backend/src/modules/README.md).
+      # The seam reads this at boot and the entrypoint gates module migrations on it.
+      # Unset = no modules, which is the stock behaviour.
+      PROXIMA_MODULES: ${PROXIMA_MODULES:-}
+    volumes:
+      - proxima-data:/data
+      # The host side of that directory. Compose cannot make a mount conditional, so
+      # when SNIPPET_DIR is unset both sides fall back to paths that exist and are
+      # never read: an inert mount, not a broken one.
+      - ${SNIPPET_HOST_DIR:-/var/tmp}:${SNIPPET_DIR:-/mnt/unused-snippets}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-4100}:4000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:4100/api}
+    image: proxima-frontend-dev
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:4100/api}
+      # The API is a DIFFERENT ORIGIN over PLAIN HTTP in this stack (3200 → 4100),
+      # and the production CSP default is `'self' https: wss:` — which blocks
+      # precisely that. Without this the browser silently refuses every API call
+      # and the UI reports "Cannot reach the Proxima API. Is the backend running?"
+      # while the backend is perfectly healthy. The console WebSocket needs the
+      # `ws://` entry for the same reason.
+      #
+      # Production does not need this because it serves the app and the API from
+      # ONE origin behind a merge-proxy, so everything is 'self'.
+      CSP_CONNECT_SRC: "'self' http://127.0.0.1:${BACKEND_PORT:-4100} ws://127.0.0.1:${BACKEND_PORT:-4100} https: wss:"
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3200}:3000"
+    depends_on:
+      - backend
+
+volumes:
+  # Becomes `proxima-dev_proxima-data` because of the project name above.
+  proxima-data:

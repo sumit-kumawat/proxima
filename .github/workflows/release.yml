@@ -1,0 +1,52 @@
+name: Release
+
+# Publishes a GitHub Release whenever a version tag is pushed, so Proxima's
+# in-app "Check for updates" (which reads the latest published release) has a
+# "Latest" to find. Cutting a release is:
+#
+#   1. bump "version" in backend/package.json AND frontend/package.json (e.g. 0.4.2)
+#   2. rewrite RELEASE_NOTES.md with curated, human-readable notes for this version
+#      (what changed, why it matters, upgrade notes) — it becomes the release body
+#   3. git commit -am "release: v0.4.2"
+#   4. git tag v0.4.2 && git push origin main --tags
+#
+# The release body = RELEASE_NOTES.md, with the auto-generated PR list appended
+# below it for traceability.
+#
+# Note: the in-app updater (Admin -> Settings -> Updates) renders the release
+# body as PLAIN TEXT, so keep RELEASE_NOTES.md free of HTML (comments included);
+# the publish step below strips HTML comments as a safety net.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Guard: if a tag is ever pushed without curated notes, fall back to a
+      # stub so the release still publishes (with the auto-notes below it).
+      # Also strip HTML comments — the in-app updater shows the body as plain
+      # text, so an instructional <!-- --> block would be visible to admins.
+      - name: Prepare release notes
+        run: |
+          if [ ! -f RELEASE_NOTES.md ]; then
+            echo "_No curated notes for this release — see the auto-generated changelog below._" > RELEASE_NOTES.md
+          fi
+          perl -0777 -pi -e 's/<!--.*?-->\s*//gs' RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          name: ${{ github.ref_name }}

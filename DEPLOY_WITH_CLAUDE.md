@@ -1,0 +1,288 @@
+# Deploy Proxima with Claude Code
+
+This file is an **executable runbook for an AI agent** (Claude Code). Point Claude Code
+at it and it will stand up a production-ready Proxima — the same shape as a hand-built
+deployment: HTTPS, tenant isolation, and (optionally) the in-guest IDE — while stopping to
+confirm every action that touches production or handles a secret.
+
+> **How a human invokes this:** open Claude Code in a clone of this repo (or on the target
+> server) and say: *"Follow DEPLOY_WITH_CLAUDE.md to deploy Proxima."* Claude Code reads
+> this file and drives the steps below. **You (the operator) stay in the loop** — you approve
+> each production action and you type every secret yourself.
+
+The canonical human runbook is [`DEPLOYMENT.md`](DEPLOYMENT.md); this file mirrors it as agent
+instructions. If they ever disagree, `DEPLOYMENT.md` wins — tell the operator.
+
+---
+
+## 0. Agent safety contract (read first, follow always)
+
+You are deploying software that will run someone's infrastructure. Behave accordingly:
+
+1. **Confirm before every production-changing or irreversible action** — enabling the cluster
+   firewall, `docker compose up`, editing a live `.env`, rebooting a VM, running a migration.
+   State exactly what you're about to run and wait for a clear "yes".
+2. **Never handle secrets in the clear.** Do not ask the operator to paste passwords, Proxmox
+   token secrets, SMTP passwords, or the `ENCRYPTION_KEY` into the chat. Generate `ENCRYPTION_KEY`
+   on the host with `openssl rand -hex 32` and have the operator paste secrets **directly into
+   the `.env` file or the browser setup wizard**, not to you. Never echo a secret back.
+3. **Never commit `.env`** (or `backend/.env`) or any file containing a secret. They are gitignored;
+   keep it that way.
+4. **Do not weaken security to make something work.** If a step fails, diagnose it — do not
+   disable the firewall, set `COOKIE_SECURE=false` in production, open app ports to the world,
+   or set `ALLOW_PRIVATE_OUTBOUND_URLS=true` unless the operator explicitly needs LAN webhooks.
+5. **Stop and ask** whenever a decision is the operator's: the domain, the isolation model, whether
+   to expose ports vs. use a tunnel, whether to enable the in-guest IDE.
+6. **Verify, don't assume.** After each phase, run the check and report the real result. If a
+   command fails, show the output; never claim success you didn't observe.
+
+If any instruction here conflicts with the safety contract, the contract wins.
+
+---
+
+## 1. Gather these from the operator (ask, then confirm back)
+
+Collect this before touching anything. Ask as a short questionnaire.
+
+- **Target host:** are we deploying on THIS machine, or over SSH to a remote host? (If remote,
+  confirm you can reach it and that it's the right box.)
+- **Public domain** for Proxima, e.g. `proxima.example.com`, with DNS already pointing at the host.
+- **HTTPS strategy:** (a) open ports 80/443 with **Caddy** auto-TLS, or (b) a **Cloudflare Tunnel**
+  (no open ports, TLS at the edge, plain HTTP to a local merge-proxy). Pick one.
+- **Proxmox:** API host URL (`https://<pve-host>:8006`), and confirm a dedicated **API token** will
+  be created with **privilege separation OFF** (see §2). Self-signed cert? (verify-SSL off in OOBE.)
+- **Tenant isolation model:** shared bridge + per-VM firewall, or a dedicated VLAN/SDN VNet
+  (recommended). The operator must confirm the **management network CIDR** (Proxmox 8006 + SSH)
+  so isolation enforcement doesn't lock them out.
+- **App-database backup directory:** a host path for Proxima's own nightly DB snapshots
+  (`PROXIMA_BACKUP_DIR`). Prefer a different physical disk from the database. Also ask **where the
+  `ENCRYPTION_KEY` backup will live — off the host** (see §9); backups are worthless without it.
+- **Optional:** SMTP relay (password-reset email **and** the compute-access-window warning emails —
+  see §6.1), Keycloak OIDC (SSO), and whether to enable the **in-guest IDE** (§7).
+
+Repeat the collected answers back and get a "go" before Phase 2.
+
+---
+
+## 2. Preflight (host + Proxmox)
+
+Run these read-only checks and report results:
+
+```bash
+docker --version && docker compose version   # Compose v2 required
+docker ps -q >/dev/null && echo daemon-ok    # versions alone don't prove daemon ACCESS —
+                                             # "permission denied" here means the deploy user
+                                             # needs the docker group (usermod -aG docker <user>, re-login)
+# DNS: does the domain resolve to this host's public IP?
+getent hosts <domain> || true
+# Can the host reach the Proxmox API?
+curl -sS -o /dev/null -w '%{http_code}\n' -k https://<pve-host>:8006/api2/json/version
+```
+
+**Proxmox API token (the #1 pitfall).** A privilege-separated token has NO permissions — storage
+lists come back empty and VM creation 403s. Have the operator run, on a Proxmox node as root:
+
+```bash
+pveum user token add root@pam proxima --privsep 0
+# → copy the displayed token VALUE now (shown once). Token ID is: root@pam!proxima
+```
+
+Tell the operator to keep that secret for the browser wizard in §5 — **do not** have them paste it to you.
+
+---
+
+## 3. Code + environment
+
+```bash
+# If not already in a clone:
+git clone <repo-url> proxima && cd proxima
+cp .env.docker.example .env
+openssl rand -hex 32           # ENCRYPTION_KEY — operator pastes THIS into .env, keeps a backup
+chmod 600 .env
+```
+
+Have the operator edit `.env` (you may open it and explain fields, but they fill secrets). The
+production block, per `DEPLOYMENT.md` §4:
+
+| Variable | Value | Why |
+|---|---|---|
+| `ENCRYPTION_KEY` | the 64-hex string | Encrypts Proxmox token + all secrets at rest. **Back it up; keep it stable.** |
+| `FRONTEND_URL` | `https://<domain>` | CORS + redirects |
+| `NEXT_PUBLIC_API_URL` | `https://<domain>/api` | Baked into the browser bundle at build time |
+| `NEXT_PUBLIC_SITE_URL` | `https://<domain>` | Public origin for SEO/OG/canonical/manifest metadata. **Also baked in at build time** — changing it needs a frontend image rebuild |
+| `BACKEND_PUBLIC_URL` | `https://<domain>` | SSO callback base — and the **IDE gateway base URL** (must be https, see §7) |
+| `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN` | `<domain>` / `https://<domain>` | Passkeys |
+| `COOKIE_SECURE` | `true` | Secure cookies (HTTPS) |
+| `TRUST_PROXY` | `1` | One proxy hop → real client IP for rate-limiting and the audit log |
+| `BIND_ADDR` | `127.0.0.1` | Only the local reverse proxy reaches the app ports |
+| `REAL_IP_HEADER` | `x-forwarded-for` with Caddy/nginx; leave unset behind Cloudflare | Which header carries the real client IP for the audit log (unset = `cf-connecting-ip`) |
+| `METRICS_TOKEN` | a random string | `/metrics` returns 404 in prod without it; scrape with `Authorization: Bearer <token>` |
+| `PROXIMA_BACKUP_DIR` | e.g. `/mnt/backups/proxima-db` | Host directory for Proxima's own nightly **database** backups. The container path is fixed at `/var/backups/proxima`; this picks the host side. Creating a folder on the host does nothing unless it's set here |
+
+Confirm `COOKIE_SECURE=true` (passkeys and `SameSite` cookies need a secure context) and
+`BACKEND_PUBLIC_URL` is your **https** origin — since v0.8.0 the IDE gateway URL is built from
+that value outright rather than sniffed from forwarded headers, which proved unreliable behind a
+proxy that rewrites `X-Forwarded-Proto`. `TRUST_PROXY=1` matters for correct client IPs in
+rate-limiting and the audit log.
+
+---
+
+## 4. TLS / reverse proxy
+
+Follow the operator's choice from §1.
+
+- **Caddy (open ports 80/443):** install Caddy, `sudo cp deploy/Caddyfile /etc/caddy/Caddyfile`,
+  set the domain + ACME email, `sudo systemctl reload caddy`. Confirm 80/443 are reachable and DNS
+  resolves so ACME can issue a cert.
+- **Cloudflare Tunnel (no open ports):** run a small no-TLS merge-proxy (see `DEPLOYMENT.md` §5
+  "Cloudflare Tunnel") that joins `/api` → `127.0.0.1:4000` and `/` → `127.0.0.1:3000` on one
+  local port, then point the tunnel's public hostname at it. **WebSockets must pass through** (the
+  noVNC console AND the IDE both need this — verify after launch).
+
+Either way there is **one HTTPS origin**; the app ports stay on `127.0.0.1`.
+
+---
+
+## 5. Build, launch, first run
+
+**Confirm with the operator, then:**
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f backend    # watch "Applying database migrations..." then "Starting Proxima API..."
+```
+
+The backend entrypoint runs `npx prisma migrate deploy` on boot, so schema + all migrations apply
+automatically. Then the operator opens `https://<domain>` and completes the **setup wizard**:
+creates the owner account, enters the Proxmox host + token (from §2), sets VM defaults (storage,
+bridge — point at the tenant VLAN/VNet), ISO storage. **The operator does this in the browser**;
+you just confirm the app is up and healthy:
+
+```bash
+curl -sS https://<domain>/api/health    # expect {"status":"ok",...}
+```
+
+---
+
+## 6. Tenant isolation enforcement (do NOT skip)
+
+Proxima applies a per-VM firewall to every tenant VM (`policy_in=DROP`, mac-filter, RFC1918 drop,
+DNS allowed) — but the rules only take effect once the Proxmox **cluster firewall** is on.
+
+- Have the operator go to **admin Settings ▸ Proxmox tab ▸ Tenant network isolation ▸ Enable
+  enforcement** (deep link: `/admin/settings?tab=proxmox`). Proxima adds
+  management allow-rules (8006 + SSH on the confirmed mgmt CIDR) **before** flipping the datacenter
+  firewall, so they don't lock themselves out. **Confirm the suggested CIDR matches their mgmt network.**
+- Verify: Proxmox web (8006) + SSH still reachable; two tenant VMs cannot reach each other.
+
+Do not proceed to the IDE until isolation is enforced and verified.
+
+### 6.1 Compute access windows (decide before inviting anyone)
+
+Invites can grant a **fixed term** of cluster access or **never expire**. The term is anchored at
+sign-up, and an admin can override it per user afterwards under **Settings ▸ Access**.
+
+State this to the operator so the behaviour isn't a surprise:
+
+- Expiry **suspends, never deletes** — the tenant's VMs are stopped and sign-in is refused across
+  every auth path (including the console WebSocket, the IDE proxy, and both token families), but
+  **nothing is destroyed** and an admin can extend the window to restore access.
+- Warning emails go out **7 days and 1 day** before a window closes, and admins get an
+  `access.expired` notification — all of which need **SMTP configured (§8)**. Without SMTP the
+  suspension still happens, silently.
+- **Admins never expire.** A sweep runs hourly (at :20), with a catch-up shortly after boot, so a
+  window that lapsed while the host was down is still enforced.
+
+Confirm with the operator: default invite duration, and whether existing invites should be
+never-expiring.
+
+---
+
+## 7. Proxima IDE — production setup (optional)
+
+The in-guest IDE (browser code-server + an OpenCode AI agent per VM) has extra requirements. Skip
+this whole section if the operator doesn't want it; the rest of Proxima is complete without it.
+
+### 7.1 Requirements to confirm with the operator
+
+- **The Proxima host must be able to reach tenant VM IPs on TCP :8080.** On a **flat** network
+  (Proxima on the same LAN as the guests) this is automatic. On a **non-flat** network (e.g.
+  Proxima in a container whose network can't reach the guest VLAN) the operator must provide
+  routing — a **Tailscale subnet route**, a VPN, or a route — so the backend can reach `guest-ip:8080`.
+  This is the operator's networking to solve; Proxima can't create it.
+- **`ide_ingress_cidr`** — when tenant isolation is on, Proxima opens a single **managed, infra-scoped**
+  `:8080` firewall pinhole on each IDE VM. It must be the address Proxima's traffic actually arrives
+  from (the backend host on a flat LAN; the **subnet-router node's LAN IP** when routed). Set it in
+  admin IDE settings (or the `ide_ingress_cidr` SystemConfig). **Never a wildcard** — the code rejects
+  `0.0.0.0/0`.
+- **Guest agent + guest specs:** IDE VMs need the QEMU **guest agent** running (the install goes
+  through it), **>= 8 GB RAM** (the default `ide_min_ram_mb` floor — the install OOMs a 4 GB box),
+  and a CPU that exposes **AVX** (the OpenCode/Bun runtime needs it). Proxima auto-sets `cpu: host`
+  at IDE-enable and, if AVX is still masked, offers the remedy the node dictates: a reboot when the
+  node's silicon has AVX (or is unknown), or a **one-click relocate to an AVX-capable node** when
+  the node's CPU demonstrably lacks it.
+- **LLM models:** in admin IDE settings, add a model **source** (an OpenAI-compatible endpoint such
+  as a local Ollama — admins may use a LAN address) and share models to tenants, and/or allow tenants
+  to bring their own keys — since v0.8.0 tenants may only use OpenAI or the fixed preset
+  OpenAI-compatible bases (OpenRouter, Groq); a free-form custom base URL is **admin-only**.
+
+### 7.2 Enable + verify
+
+- Admin **Settings ▸ Proxima IDE**: set the tier (off / admin / tenants), the model source, shared
+  models + visibility, and `ide_ingress_cidr`.
+- On a test VM (>= 8 GB, guest agent running), click **Open IDE**. Proxima installs code-server +
+  OpenCode into the guest, opens the editor, and wires the AI agent through the gateway. Confirm:
+  the terminal shows the VM's own hostname; the AI agent answers a prompt (that proves the whole
+  chain: reachability, firewall pinhole, https gateway URL, model routing).
+
+### 7.3 IDE security model (state this to the operator)
+
+- The proxy is **capability-gated** (`getVmWithCap(vmId, user, 'ide')`) and refuses
+  loopback/link-local targets. The owner, an admin, and any **Manager**-level share holder can open
+  the IDE; Viewer and Operator shares cannot.
+- The `:8080` pinhole is **infra-scoped only** — the guest keeps `policy_in=DROP`, so tenants stay
+  isolated from each other; only Proxima's address can reach code-server.
+- The LLM gateway enforces an **admin allow-list** (a tenant can't reach an un-shared model or,
+  when disabled, any BYO key), the token is **per-VM** and never in the guest config in cleartext
+  beyond an env file, and tenant BYO endpoints are restricted to an **allow-list of preset
+  providers** (OpenAI / OpenRouter / Groq) — free-form custom base URLs are admin-only — on top of
+  the SSRF guard.
+
+---
+
+## 8. Final verification checklist
+
+Report each as pass/fail with evidence:
+
+- [ ] `https://<domain>` loads on a valid cert; `/api/health` returns `ok`.
+- [ ] OOBE done, Proxmox connected; a test VM created, console (noVNC WebSocket) opened, deleted.
+- [ ] Tenant isolation enforced; mgmt (8006/SSH) still reachable; two tenants isolated.
+- [ ] (If enabled) IDE opens on a test VM, lands on the right guest, AI agent answers.
+- [ ] `.env` is `chmod 600`, not committed; `ENCRYPTION_KEY` backed up by the operator.
+- [ ] App ports (3000/4000) are NOT reachable from the internet; only 80/443 (or the tunnel) are.
+
+---
+
+## 9. Rollback / recovery
+
+- **Back up Proxima's own database before any change.** Proxima snapshots its DB nightly
+  (`VACUUM INTO`, consistent on a live database) into `PROXIMA_BACKUP_DIR` with rolling retention —
+  force one from **Settings ▸ Maintenance ▸ Back up now**. A manual volume snapshot still works as a
+  belt-and-braces alternative:
+  `docker run --rm -v proxima_proxima-data:/data -v "$PWD":/backup alpine tar czf /backup/proxima-db-$(date +%F).tgz -C /data .`
+- **A database backup is useless without `ENCRYPTION_KEY`.** Every stored secret (Proxmox token,
+  SMTP password, TOTP secrets) is AES-256-GCM encrypted under it. Keep one copy **off the host** —
+  it never changes, so a password-manager entry is enough.
+- **Bad deploy:** `git checkout <previous-tag> && docker compose up -d --build` (migrations are
+  forward-only; restore the DB volume backup if a migration must be undone). Note the backend
+  entrypoint runs `prisma migrate deploy` itself — never run migrations by hand, and never via
+  `docker compose run` (it inherits the entrypoint and hangs booting a second server).
+- **Locked out by the firewall:** Proxmox VM/firewall config lives on shared pmxcfs — fix it from a
+  healthy node (`/etc/pve/firewall/…`), or disable the datacenter firewall from a node console.
+
+---
+
+*Companion docs: [`DEPLOYMENT.md`](DEPLOYMENT.md) (human runbook), [`SECURITY.md`](SECURITY.md)
+(threat model + tenant isolation), [`docs/admin-guide.md`](docs/admin-guide.md), and the in-repo
+IDE docs.*

@@ -1,0 +1,469 @@
+/**
+ * Branded transactional email templates. Every email Proxima sends — password
+ * resets, event notifications, lockout alerts, invites — is composed here so they
+ * share one identity: the same wordmark header, palette, typography, footer, and
+ * email-client-safe table layout. Add a new template by writing a `bodyRows`
+ * builder and wrapping it with {@link wrapEmail}; never hand-roll a standalone
+ * email elsewhere, or the branding drifts.
+ */
+
+const FONT =
+  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+
+// Fixed light palette matching the app's monochrome theme. Email clients can't be
+// trusted with CSS variables or @media dark-mode, so colours are inlined literals.
+const INK = '#18181b'; // headings / primary text
+const BODY = '#3f3f46'; // body copy
+const MUTED = '#71717a'; // secondary copy
+const FAINT = '#a1a1aa'; // footer
+const LINK = '#2563eb'; // hyperlinks
+const HAIR = '#f0f0f0'; // hairline divider
+const LINE = '#e4e4e7'; // panel border
+
+export interface RenderedEmail {
+  subject: string;
+  text: string;
+  html: string;
+}
+
+/**
+ * Wrap inner table rows in Proxima's branded, email-client-safe shell: table
+ * layout + inline styles (for Outlook/Gmail), a fixed light palette matching the
+ * app's monochrome theme, a hidden preheader, and a wordmark header + footer.
+ */
+function wrapEmail(preheader: string, bodyRows: string): string {
+  return `<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<meta name="supported-color-schemes" content="light" />
+<title>Proxima</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5;">
+<div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all;">${preheader}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
+<tr>
+<td align="center" style="padding:32px 16px;">
+<table role="presentation" width="480" cellpadding="0" cellspacing="0" border="0" style="width:480px; max-width:480px; background-color:#ffffff; border:1px solid ${LINE}; border-radius:12px;">
+<tr>
+<td style="padding:32px 40px 4px;">
+<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+<tr>
+<td style="vertical-align:middle; padding-right:11px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="42" style="width:42px; background-color:#18181b; border-radius:11px;">
+<tr><td align="center" valign="middle" style="padding:11px 0;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0">
+<tr><td style="width:22px; height:8px; background-color:#ffffff; border-radius:2px;"><div style="width:3px; height:3px; background-color:#18181b; border-radius:50%; margin:2px 0 0 3px; font-size:0; line-height:0;">&nbsp;</div></td></tr>
+<tr><td style="height:4px; font-size:0; line-height:4px;">&nbsp;</td></tr>
+<tr><td style="width:22px; height:8px; background-color:#ffffff; border-radius:2px;"><div style="width:3px; height:3px; background-color:#18181b; border-radius:50%; margin:2px 0 0 3px; font-size:0; line-height:0;">&nbsp;</div></td></tr>
+</table>
+</td></tr>
+</table>
+</td>
+<td style="vertical-align:middle;">
+<span style="font-family:${FONT}; font-size:22px; font-weight:600; letter-spacing:-0.02em; color:#18181b;">Proxima</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td style="padding:24px 40px 8px; font-family:${FONT};">
+${bodyRows}
+</td>
+</tr>
+<tr>
+<td style="padding:24px 40px 32px; border-top:1px solid ${HAIR};">
+<p style="margin:0; font-family:${FONT}; font-size:12px; line-height:1.5; color:${FAINT};">Proxima &middot; Conzex Global Private Limited - an Opensource project.</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>`;
+}
+
+// ─── Reusable content builders (drop into a body cell) ────────────────────────
+// Keeping the markup for headings, paragraphs, buttons, link fallbacks and
+// key/value panels in one place is what makes every email look the same.
+
+const h1 = (text: string): string =>
+  `<h1 style="margin:0 0 14px; font-size:18px; font-weight:600; color:${INK};">${text}</h1>`;
+
+const p = (
+  text: string,
+  opts: { color?: string; size?: number; mt?: number; mb?: number } = {},
+): string => {
+  const { color = BODY, size = 15, mt = 0, mb = 22 } = opts;
+  return `<p style="margin:${mt}px 0 ${mb}px; font-size:${size}px; line-height:1.6; color:${color};">${text}</p>`;
+};
+
+const button = (href: string, label: string): string =>
+  `<table role="presentation" cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td style="border-radius:8px; background-color:${INK};">
+<a href="${href}" style="display:inline-block; padding:12px 28px; font-family:${FONT}; font-size:15px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:8px;">${label}</a>
+</td>
+</tr>
+</table>`;
+
+/** The "if the button doesn't work, paste this URL" fallback used after CTAs. */
+const linkFallback = (url: string): string =>
+  `<p style="margin:22px 0 6px; font-size:13px; line-height:1.6; color:${MUTED};">If the button doesn't work, paste this URL into your browser:</p>
+<p style="margin:0 0 4px; font-size:13px; line-height:1.5; word-break:break-all;"><a href="${url}" style="color:${LINK}; text-decoration:underline;">${url}</a></p>`;
+
+/** A bordered key/value panel (quotas, lockout details, …). */
+const infoTable = (rows: Array<[string, string]>): string => {
+  const cells = rows
+    .map(([k, v], i) => {
+      const border = i === rows.length - 1 ? '' : ` border-bottom:1px solid ${HAIR};`;
+      return `<tr>
+<td style="padding:10px 14px; font-size:13px; color:${MUTED};${border}">${k}</td>
+<td style="padding:10px 14px; font-size:13px; font-weight:600; color:${INK}; text-align:right;${border}">${v}</td>
+</tr>`;
+    })
+    .join('\n');
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%; margin:4px 0 22px; border:1px solid ${LINE}; border-radius:8px;">
+${cells}
+</table>`;
+};
+
+const escapeHtml = (s: string): string =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+const formatRamMb = (mb: number): string => {
+  const gb = mb / 1024;
+  return `${Number.isInteger(gb) ? gb : Math.round(gb * 10) / 10} GB`;
+};
+
+const formatWhen = (d: Date | string): string => new Date(d).toUTCString();
+
+/**
+ * Render a compute-access window for humans. null/'never' is the common case
+ * and must read as reassuring, not as missing data.
+ */
+const humanizeAccessDuration = (d: string | null | undefined): string => {
+  if (!d || d === 'never') return 'No expiry';
+  const days = parseInt(d, 10);
+  if (!Number.isFinite(days)) return 'No expiry';
+  if (days === 365) return '1 year from sign-up';
+  if (days % 30 === 0 && days >= 60) return `${days / 30} months from sign-up`;
+  return `${days} days from sign-up`;
+};
+
+// ─── Templates ────────────────────────────────────────────────────────────────
+
+/** Branded password-reset email (HTML + plain-text fallback). */
+export function passwordResetEmail(resetUrl: string): RenderedEmail {
+  const subject = 'Reset your Proxima password';
+
+  const text =
+    'Someone requested a password reset for your Proxima account.\n\n' +
+    `Reset it here (valid for 1 hour):\n${resetUrl}\n\n` +
+    "If this wasn't you, you can ignore this email — your password won't change.";
+
+  const bodyRows =
+    h1('Reset your password') +
+    p('Someone requested a password reset for your Proxima account. Choose a new password with the button below.') +
+    button(resetUrl, 'Reset password') +
+    `<p style="margin:22px 0 6px; font-size:13px; line-height:1.6; color:${MUTED};">This link expires in <span style="color:${BODY};">1 hour</span>. If the button doesn't work, paste this URL into your browser:</p>
+<p style="margin:0 0 18px; font-size:13px; line-height:1.5; word-break:break-all;"><a href="${resetUrl}" style="color:${LINK}; text-decoration:underline;">${resetUrl}</a></p>` +
+    p("If you didn't request this, you can safely ignore this email — your password won't change.", {
+      color: MUTED,
+      size: 13,
+      mb: 0,
+    });
+
+  return {
+    subject,
+    text,
+    html: wrapEmail('Reset your Proxima password — this link is valid for 1 hour.', bodyRows),
+  };
+}
+
+/** Branded event notification (backup failed, VM error, lockout, test, …). */
+export function notificationEmail(eventLabel: string, title: string, message: string): RenderedEmail {
+  const subject = `[Proxima] ${eventLabel}: ${title}`;
+  const text = `${eventLabel}\n${title}\n\n${message}`;
+
+  const bodyRows =
+    h1(escapeHtml(eventLabel)) +
+    p(escapeHtml(title), { color: INK, mb: 16 }) +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%; margin:0 0 22px; background-color:#fafafa; border:1px solid ${LINE}; border-radius:8px;">
+<tr><td style="padding:14px 16px; font-family:${FONT}; font-size:14px; line-height:1.6; color:${BODY}; white-space:pre-wrap;">${escapeHtml(message)}</td></tr>
+</table>` +
+    p('This is an automated Proxima notification. You can adjust which events email you on the admin Settings page.', {
+      color: MUTED,
+      size: 13,
+      mb: 0,
+    });
+
+  return { subject, text, html: wrapEmail(`${eventLabel}: ${title}`, bodyRows) };
+}
+
+/** Branded brute-force account-lockout alert sent to admins. */
+export function accountLockedEmail(opts: {
+  email: string;
+  attempts: number;
+  ip: string | null;
+  lockedUntil: Date;
+  lockMinutes: number;
+}): RenderedEmail {
+  const { email, attempts, ip, lockedUntil, lockMinutes } = opts;
+  const subject = `[Proxima] Account locked after failed logins: ${email}`;
+
+  const text =
+    `The account "${email}" was locked after ${attempts} consecutive failed login attempts` +
+    `${ip ? ` from IP ${ip}` : ''}.\n\n` +
+    `It unlocks automatically at ${formatWhen(lockedUntil)} (${lockMinutes} minutes).\n\n` +
+    `If this wasn't the account owner mistyping their password, someone may be ` +
+    `attempting to brute-force this account. Review the audit log in Proxima.`;
+
+  const rows: Array<[string, string]> = [
+    ['Account', escapeHtml(email)],
+    ['Failed attempts', String(attempts)],
+  ];
+  if (ip) rows.push(['Source IP', escapeHtml(ip)]);
+  rows.push(['Unlocks at', `${formatWhen(lockedUntil)} (${lockMinutes} min)`]);
+
+  const bodyRows =
+    h1('Account locked') +
+    p(`A Proxima account was locked after ${attempts} consecutive failed login attempts. It will unlock automatically.`) +
+    infoTable(rows) +
+    p(
+      "If this wasn't the account owner mistyping their password, someone may be attempting to brute-force this account — review the audit log in Proxima.",
+      { color: MUTED, size: 13, mb: 0 },
+    );
+
+  return { subject, text, html: wrapEmail(`Account ${email} was locked after failed logins.`, bodyRows) };
+}
+
+/** Branded invite email — the link an admin sends to a prospective user. */
+export function inviteEmail(opts: {
+  inviteUrl: string;
+  label?: string | null;
+  maxCpu: number;
+  maxRam: number; // MB
+  maxStorage: number; // GB
+  require2fa: boolean;
+  /** Compute window granted by this invite. null = never expires. */
+  accessDuration?: string | null;
+  expiresAt: Date;
+  inviterName?: string | null;
+}): RenderedEmail {
+  const { inviteUrl, maxCpu, maxRam, maxStorage, require2fa, accessDuration, expiresAt, inviterName } = opts;
+  const subject = "You're invited to Proxima";
+
+  const from = inviterName ? `${inviterName} has invited you` : "You've been invited";
+  const text =
+    `${from} to Proxima — a private slice of a Proxmox cluster where you can spin up your own VMs.\n\n` +
+    `Accept your invite (expires ${formatWhen(expiresAt)}):\n${inviteUrl}\n\n` +
+    `Your quota: ${maxCpu} vCPU · ${formatRamMb(maxRam)} RAM · ${maxStorage} GB storage.` +
+    (require2fa ? '\nYou will be asked to set up two-step authentication during sign-up.' : '');
+
+  const rows: Array<[string, string]> = [
+    ['vCPU', String(maxCpu)],
+    ['Memory', formatRamMb(maxRam)],
+    ['Storage', `${maxStorage} GB`],
+    // Two different clocks — label them so they can't be confused: this one is
+    // how long the LINK stays usable, the next is how long the ACCESS lasts.
+    ['Invite link expires', formatWhen(expiresAt)],
+    ['Access', humanizeAccessDuration(accessDuration)],
+  ];
+  if (require2fa) rows.push(['Two-step auth', 'Required at sign-up']);
+
+  const bodyRows =
+    h1("You're invited to Proxima") +
+    p(
+      `${escapeHtml(from)} to Proxima — a private slice of a Proxmox cluster where you can create and manage your own virtual machines, within the quota below.`,
+    ) +
+    button(inviteUrl, 'Accept invite') +
+    infoTable(rows) +
+    linkFallback(inviteUrl) +
+    p('If you weren\'t expecting this invite, you can safely ignore this email.', {
+      color: MUTED,
+      size: 13,
+      mt: 16,
+      mb: 0,
+    });
+
+  return { subject, text, html: wrapEmail("You're invited to Proxima — accept your invite link inside.", bodyRows) };
+}
+
+/**
+ * Branded admin broadcast — a maintenance/downtime/general announcement sent to
+ * every user. The admin controls the subject and free-text message (preserved
+ * line breaks, HTML-escaped). When a per-recipient `unsubscribeUrl` is provided
+ * (Community Edition), the footer carries an unsubscribe link — it opts the
+ * recipient out of broadcasts only, never transactional/security email.
+ */
+export function announcementEmail(subject: string, message: string, unsubscribeUrl?: string): RenderedEmail {
+  const text =
+    `${subject}\n\n${message}` +
+    (unsubscribeUrl ? `\n\n—\nUnsubscribe from these announcements: ${unsubscribeUrl}` : '');
+  const bodyRows =
+    h1(escapeHtml(subject)) +
+    `<div style="font-family:${FONT}; font-size:15px; line-height:1.6; color:${BODY}; white-space:pre-wrap;">${escapeHtml(message)}</div>` +
+    p("You're receiving this because you have a Proxima account on this server.", {
+      color: MUTED,
+      size: 13,
+      mt: 24,
+      mb: unsubscribeUrl ? 6 : 0,
+    }) +
+    (unsubscribeUrl
+      ? `<p style="margin:0; font-size:12px; line-height:1.6; color:${FAINT};"><a href="${escapeHtml(unsubscribeUrl)}" style="color:${MUTED}; text-decoration:underline;">Unsubscribe</a> from announcement emails — account and security emails are unaffected.</p>`
+      : '');
+  return { subject, text, html: wrapEmail(subject, bodyRows) };
+}
+
+/**
+ * Branded heads-up sent to a VM's owner when an admin migrates their VM to
+ * another host (manual migrate or a maintenance node-drain). Reassures them that
+ * a running guest keeps running with at most a momentary blip; a stopped guest
+ * has no extra interruption.
+ */
+export function vmMaintenanceEmail(opts: { vmName: string; live: boolean }): RenderedEmail {
+  const { vmName, live } = opts;
+  const subject = `[Proxima] Maintenance: your server "${vmName}" is being moved`;
+
+  const blipText = live
+    ? 'Your server keeps running throughout the move, but you may notice a brief, momentary interruption — typically a second or less — as it switches hosts. Active connections normally reconnect on their own.'
+    : 'Your server is currently powered off, so there is no extra interruption — it will simply be on a different host the next time you start it.';
+
+  const text =
+    `Maintenance is being performed on the Proxima cluster, and your VM "${vmName}" is being migrated to another host.\n\n` +
+    `${blipText}\n\n` +
+    `No action is needed on your part — this is just a heads-up.`;
+
+  const bodyRows =
+    h1('Maintenance on your server') +
+    p(
+      `Maintenance is being performed on the Proxima cluster, and your VM <strong style="color:${INK};">${escapeHtml(vmName)}</strong> is being migrated to another host.`,
+    ) +
+    p(blipText) +
+    p('No action is needed on your part — this message is just to let you know.', {
+      color: MUTED,
+      size: 13,
+      mb: 0,
+    });
+
+  return {
+    subject,
+    text,
+    html: wrapEmail(`Maintenance: your server "${escapeHtml(vmName)}" is being moved to another host.`, bodyRows),
+  };
+}
+
+/**
+ * Branded alert sent to a VM's owner when one of their per-VM resource alerts
+ * trips (CPU/memory sustained high, disk nearly full, or an unexpected stop).
+ * `detail` is a one-line human summary already composed by the alert service.
+ */
+export function alertEmail(opts: { vmName: string; alertLabel: string; detail: string; vmUrl?: string }): RenderedEmail {
+  const { vmName, alertLabel, detail, vmUrl } = opts;
+  const subject = `[Proxima] Alert: ${vmName} — ${alertLabel}`;
+  const text =
+    `${alertLabel} on your server "${vmName}".\n\n${detail}\n\n` +
+    (vmUrl ? `View it: ${vmUrl}\n\n` : '') +
+    `You're receiving this because you set an alert on this machine. Manage alerts on its page under Settings.`;
+
+  const bodyRows =
+    h1(`${escapeHtml(alertLabel)}`) +
+    p(
+      `Your server <strong style="color:${INK};">${escapeHtml(vmName)}</strong> tripped an alert you set.`,
+      { mb: 16 },
+    ) +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%; margin:0 0 22px; background-color:#fafafa; border:1px solid ${LINE}; border-radius:8px;">
+<tr><td style="padding:14px 16px; font-family:${FONT}; font-size:14px; line-height:1.6; color:${BODY};">${escapeHtml(detail)}</td></tr>
+</table>` +
+    (vmUrl
+      ? p(`<a href="${escapeHtml(vmUrl)}" style="color:${LINK};">Open ${escapeHtml(vmName)} in Proxima</a>`, { mb: 16 })
+      : '') +
+    p('You set this alert on the machine’s page. Adjust or remove it there under Settings → Alerts.', {
+      color: MUTED,
+      size: 13,
+      mb: 0,
+    });
+
+  return { subject, text, html: wrapEmail(`${alertLabel}: ${escapeHtml(vmName)}`, bodyRows) };
+}
+
+/**
+ * Branded email carrying a single-use link to download a VM backup file. Sent
+ * when a tenant requests a MateState download (feature requires the admin to
+ * mount the backup share). The link expires and works once.
+ */
+export function backupDownloadEmail(opts: { vmName?: string; link: string; filename: string; ttlMinutes: number }): RenderedEmail {
+  const { link, filename, ttlMinutes } = opts;
+  const subject = `[Proxima] Your backup download is ready`;
+  const text =
+    `Your Proxima backup is ready to download:\n\n${filename}\n\n${link}\n\n` +
+    `This link works once and expires in ${ttlMinutes} minutes. If you didn't request it, you can ignore this email.`;
+
+  const bodyRows =
+    h1('Your backup is ready') +
+    p(`The backup you requested is ready to download:`, { mb: 8 }) +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%; margin:0 0 20px; background-color:#fafafa; border:1px solid ${LINE}; border-radius:8px;">
+<tr><td style="padding:12px 16px; font-family:${FONT}; font-size:13px; line-height:1.5; color:${BODY}; word-break:break-all;">${escapeHtml(filename)}</td></tr>
+</table>` +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 20px;"><tr><td style="border-radius:8px; background-color:${INK};">
+<a href="${escapeHtml(link)}" style="display:inline-block; padding:11px 20px; font-family:${FONT}; font-size:14px; font-weight:600; color:#ffffff; text-decoration:none;">Download backup</a>
+</td></tr></table>` +
+    p(`This link works once and expires in ${ttlMinutes} minutes. If you didn't request it, you can safely ignore this email.`, {
+      color: MUTED,
+      size: 13,
+      mb: 0,
+    });
+
+  return { subject, text, html: wrapEmail('Your Proxima backup is ready to download', bodyRows) };
+}
+
+/**
+ * Heads-up that a tenant's compute window is about to close (sent 7 days and
+ * again 1 day out). Deliberately non-alarming: nothing is deleted at expiry,
+ * and the fix is a conversation with the admin — so the email says exactly
+ * that rather than implying data loss.
+ */
+export function accessExpiringEmail(opts: {
+  displayName: string;
+  expiresAt: Date;
+  daysLeft: number;
+  vmCount: number;
+  dashboardUrl: string;
+}): RenderedEmail {
+  const { displayName, expiresAt, daysLeft, vmCount, dashboardUrl } = opts;
+  const when = daysLeft <= 1 ? 'tomorrow' : `in ${daysLeft} days`;
+  const subject = `[Proxima] Your access ends ${when}`;
+  const machines = vmCount === 1 ? '1 machine' : `${vmCount} machines`;
+
+  const text =
+    `Hi ${displayName},\n\n` +
+    `Your Proxima access ends ${when} (${formatWhen(expiresAt)}).\n\n` +
+    `When it does, your ${machines} will be powered off and you won't be able to sign in. ` +
+    `Nothing is deleted — your disks and backups are kept, and an administrator can restore ` +
+    `your access at any time.\n\n${dashboardUrl}\n`;
+
+  const rows: Array<[string, string]> = [
+    ['Access ends', formatWhen(expiresAt)],
+    ['Days left', String(Math.max(0, daysLeft))],
+    ['Machines affected', String(vmCount)],
+  ];
+
+  const bodyRows =
+    h1(`Your Proxima access ends ${escapeHtml(when)}`) +
+    p(`Hi ${escapeHtml(displayName)} — your compute window closes ${escapeHtml(when)}.`) +
+    infoTable(rows) +
+    p(
+      `Your ${escapeHtml(machines)} will be powered off and sign-in will stop working. ` +
+        '<strong>Nothing is deleted</strong> — your disks and backups are kept, and an ' +
+        'administrator can restore your access at any time.',
+    ) +
+    button(dashboardUrl, 'Open Proxima') +
+    linkFallback(dashboardUrl);
+
+  return { subject, text, html: wrapEmail(`Your Proxima access ends ${when}.`, bodyRows) };
+}

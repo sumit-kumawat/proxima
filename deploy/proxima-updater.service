@@ -1,0 +1,18 @@
+# Proxima in-app updater (triggered by proxima-updater.path).
+#
+# Install (as root):
+#   cp deploy/proxima-updater.{service,path} /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now proxima-updater.path
+#
+# Adjust PROXIMA_DIR below if your checkout isn't /opt/proxima.
+[Unit]
+Description=Proxima updater — applies an in-app update request
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=PROXIMA_DIR=/opt/proxima
+WorkingDirectory=/opt/proxima
+ExecStart=/opt/proxima/deploy/update.sh --from-request
