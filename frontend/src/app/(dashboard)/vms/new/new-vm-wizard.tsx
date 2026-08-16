@@ -827,17 +827,17 @@ export default function NewVmWizard() {
                           className="h-20 w-full resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
                         />
                       </FormField>
-                      <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-4">
                         {isCloud && (
                           <FormField label="Username">
-                            <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="debian" />
+                            <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="debian" className="w-full" />
                           </FormField>
                         )}
                         <FormField
                           label={isContainer ? "Root Password" : "Password (optional)"}
                           hint={isContainer ? "Set container root password" : "SSH key is recommended"}
                         >
-                          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full" />
                         </FormField>
                       </div>
                     </div>

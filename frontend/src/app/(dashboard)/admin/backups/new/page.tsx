@@ -15,11 +15,10 @@ import {
   Square,
   HardDrive,
   Container,
-  MessageSquare,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { PageHeader } from "@/components/dashboard/page-header";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +53,7 @@ export default function NewBackupJobPage() {
   const [selectedVmIds, setSelectedVmIds] = useState<string[]>([]);
   const [vmSearchFilter, setVmSearchFilter] = useState<string>("");
   const [schedulePreset, setSchedulePreset] = useState<string>("weekly");
+  const [timePicker, setTimePicker] = useState<string>("03:00");
   const [cronInput, setCronInput] = useState<string>("0 3 * * 0");
   const [keepInput, setKeepInput] = useState<number>(3);
   const [storageInput, setStorageInput] = useState<string>("local");
@@ -88,11 +88,31 @@ export default function NewBackupJobPage() {
     }
   };
 
+  const syncCronFromTime = (time: string, preset: string) => {
+    const parts = time.split(":");
+    const hours = parseInt(parts[0] || "3", 10);
+    const minutes = parseInt(parts[1] || "0", 10);
+
+    if (preset === "daily") {
+      setCronInput(`${minutes} ${hours} * * *`);
+    } else if (preset === "weekly") {
+      setCronInput(`${minutes} ${hours} * * 0`);
+    } else if (preset === "twice_daily") {
+      const secondHour = (hours + 12) % 24;
+      setCronInput(`${minutes} ${hours},${secondHour} * * *`);
+    } else {
+      setCronInput(`${minutes} ${hours} * * *`);
+    }
+  };
+
+  const handleTimeChange = (newTime: string) => {
+    setTimePicker(newTime);
+    syncCronFromTime(newTime, schedulePreset);
+  };
+
   const handlePresetChange = (preset: string) => {
     setSchedulePreset(preset);
-    if (preset === "daily") setCronInput("0 3 * * *");
-    else if (preset === "weekly") setCronInput("0 3 * * 0");
-    else if (preset === "twice_daily") setCronInput("0 */12 * * *");
+    syncCronFromTime(timePicker, preset);
   };
 
   const handleSaveJobPolicy = async () => {
@@ -231,13 +251,13 @@ export default function NewBackupJobPage() {
             </div>
 
             {/* Section 3: Schedule & Timing */}
-            <div className="space-y-3 border-t pt-5">
+            <div className="space-y-4 border-t pt-5">
               <div>
                 <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
                   <Clock className="size-5 text-primary" /> Backup Schedule & Timing
                 </h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Select a schedule preset or enter a custom 5-field cron expression.
+                  Select a frequency preset and pick the clock time to automatically update the Cron schedule.
                 </p>
               </div>
 
@@ -248,7 +268,7 @@ export default function NewBackupJobPage() {
                   onClick={() => handlePresetChange("weekly")}
                   className="h-10 text-xs gap-2 font-medium"
                 >
-                  <Clock className="size-4 shrink-0" /> Weekly (Sun 03:00)
+                  <Clock className="size-4 shrink-0" /> Weekly (Sunday)
                 </Button>
                 <Button
                   type="button"
@@ -256,7 +276,7 @@ export default function NewBackupJobPage() {
                   onClick={() => handlePresetChange("daily")}
                   className="h-10 text-xs gap-2 font-medium"
                 >
-                  <Clock className="size-4 shrink-0" /> Daily (03:00)
+                  <Clock className="size-4 shrink-0" /> Daily
                 </Button>
                 <Button
                   type="button"
@@ -268,41 +288,54 @@ export default function NewBackupJobPage() {
                 </Button>
               </div>
 
-              <FormField label="Standard 5-Field Cron Expression" hint="e.g. 0 3 * * 0 = Every Sunday at 03:00 AM">
-                <Input
-                  value={cronInput}
-                  onChange={(e) => setCronInput(e.target.value)}
-                  placeholder="0 3 * * 0"
-                  className="font-mono h-9 text-xs"
-                />
-              </FormField>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Execution Clock Time" hint="Pick execution time (HH:MM)">
+                  <Input
+                    type="time"
+                    value={timePicker}
+                    onChange={(e) => handleTimeChange(e.target.value)}
+                    className="font-mono h-9 text-xs cursor-pointer"
+                  />
+                </FormField>
+
+                <FormField label="Calculated 5-Field Cron Expression" hint="Auto-calculated from time picker or custom input">
+                  <Input
+                    value={cronInput}
+                    onChange={(e) => setCronInput(e.target.value)}
+                    placeholder="0 3 * * 0"
+                    className="font-mono h-9 text-xs"
+                  />
+                </FormField>
+              </div>
             </div>
 
             {/* Section 4: Retention & Target Storage */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 border-t pt-5">
-              <FormField label="Retention Keep Count" hint="Keeps N newest backups before auto-pruning old snapshots.">
-                <Input
-                  type="number"
-                  min={1}
-                  max={30}
-                  value={keepInput}
-                  onChange={(e) => setKeepInput(Number(e.target.value))}
-                  className="font-mono h-9 text-xs"
-                />
-              </FormField>
+            <div className="space-y-4 border-t pt-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <FormField label="Retention Keep Count" hint="Keeps N newest backups before auto-pruning old snapshots.">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={keepInput}
+                    onChange={(e) => setKeepInput(Number(e.target.value))}
+                    className="font-mono h-9 text-xs"
+                  />
+                </FormField>
 
-              <FormField label="Target Proxmox Storage Pool" hint="Proxmox storage pool where backup volumes are saved.">
-                <Select value={storageInput} onValueChange={(v: any) => setStorageInput(String(v))}>
-                  <SelectTrigger className="h-9 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="local">local (Proxmox Default Directory)</SelectItem>
-                    <SelectItem value="PROD-Storage">PROD-Storage (NFS/Ceph Shared)</SelectItem>
-                    <SelectItem value="vzdump">vzdump (Proxmox Backup Target)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FormField>
+                <FormField label="Target Proxmox Storage Pool" hint="Proxmox storage pool where backup volumes are saved.">
+                  <Select value={storageInput} onValueChange={(v: any) => setStorageInput(String(v))}>
+                    <SelectTrigger className="h-9 text-xs w-full">
+                      <SelectValue className="truncate" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="local">local (Proxmox Default Directory)</SelectItem>
+                      <SelectItem value="PROD-Storage">PROD-Storage (NFS/Ceph Shared)</SelectItem>
+                      <SelectItem value="vzdump">vzdump (Proxmox Backup Target)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormField>
+              </div>
             </div>
 
             {/* Page Footer Navigation Action Buttons */}

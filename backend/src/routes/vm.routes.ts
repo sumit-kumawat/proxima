@@ -177,7 +177,7 @@ const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === 
 
 const CreateVmSchema = z.object({
   name: z.preprocess(
-    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '') : v),
+    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '') : v),
     z.string().min(1).max(63),
   ),
   cpu: z.number().int().positive().max(64),
@@ -392,7 +392,7 @@ router.post('/restore-upload', async (req: Request, res: Response) => {
 
 const CreateContainerSchema = z.object({
   name: z.preprocess(
-    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '') : v),
+    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '') : v),
     z.string().min(1).max(63),
   ),
   cpu: z.number().int().positive().max(64),

@@ -1266,10 +1266,16 @@ async function stopAndDeleteProxmoxVm(
 }
 
 export async function destroyVm(vm: VirtualMachine): Promise<void> {
-  const currentVm = await syncVmNode(vm);
-  const client = await pve.getClient();
-  await stopAndDeleteProxmoxVm(currentVm.proxmoxNode, currentVm.proxmoxVmId, client, kindOf(currentVm));
-  await prisma.virtualMachine.delete({ where: { id: currentVm.id } });
+  const currentVm = await syncVmNode(vm).catch(() => vm);
+  try {
+    const client = await pve.getClient();
+    await stopAndDeleteProxmoxVm(currentVm.proxmoxNode, currentVm.proxmoxVmId, client, kindOf(currentVm));
+  } catch (err) {
+    const msg = pve.pveMessage(err);
+    console.warn(`[destroyVm] Proxmox delete task warning for VM ${vm.id} (vmid ${vm.proxmoxVmId}): ${msg}`);
+  } finally {
+    await prisma.virtualMachine.delete({ where: { id: vm.id } }).catch(() => undefined);
+  }
 }
 
 /**
