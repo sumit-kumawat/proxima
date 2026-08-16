@@ -122,15 +122,14 @@ export default function NewBackupJobPage() {
     }
     setSavingJob(true);
     try {
-      await Promise.all(
-        selectedVmIds.map((id) =>
-          api.patch(`/vms/${id}`, {
-            backupCron: cronInput,
-            backupKeep: keepInput,
-          })
-        )
-      );
-      toast.success(`Backup job saved for ${selectedVmIds.length} guest(s).`);
+      await api.post("/admin/backups/jobs", {
+        vmIds: selectedVmIds,
+        cron: cronInput,
+        keep: keepInput,
+        storage: storageInput,
+        comment: jobComment,
+      });
+      toast.success(`Backup job created & saved for ${selectedVmIds.length} guest(s).`);
       router.push("/admin/backups");
     } catch (err) {
       toast.error(apiError(err));

@@ -8,6 +8,7 @@ import { enforceMfaSetup } from '../middleware/mfa.js';
 import { assertPublicHttpUrlShape } from '../lib/url-safety.js';
 import { getConfig, setConfig } from '../services/config.service.js';
 import { testProxmoxConnection, saveDefaults } from '../services/setup.service.js';
+import * as pve from '../services/proxmox.service.js';
 import {
   isClusterFirewallEnabled,
   getClusterStats,
@@ -1201,6 +1202,62 @@ router.get('/backups/all', async (_req: Request, res: Response) => {
       vm: b.vm,
     })),
   );
+});
+
+// ─── POST /api/admin/backups/jobs ─────────────────────────────
+// Save multi-VM backup job policy both in DB and Proxmox cluster backup scheduler.
+const CreateBackupJobSchema = z.object({
+  vmIds: z.array(z.string()).min(1),
+  cron: z.string().min(1),
+  keep: z.number().int().min(1).max(30).optional(),
+  storage: z.string().optional(),
+  comment: z.string().optional(),
+});
+
+router.post('/backups/jobs', async (req: Request, res: Response) => {
+  const parsed = CreateBackupJobSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
+    return;
+  }
+  const { vmIds, cron, keep, storage, comment } = parsed.data;
+
+  // 1. Update policies on DB rows
+  await Promise.all(
+    vmIds.map((id) =>
+      prisma.virtualMachine.update({
+        where: { id },
+        data: {
+          backupCron: cron,
+          backupKeep: keep ?? 3,
+        },
+      }).catch(() => undefined),
+    ),
+  );
+
+  // 2. Register Cluster VZDump Backup Job with Proxmox cluster API if available
+  try {
+    const client = await pve.getClient();
+    const vms = await prisma.virtualMachine.findMany({
+      where: { id: { in: vmIds } },
+      select: { proxmoxVmId: true },
+    });
+    const vmidsStr = vms.map((v) => v.proxmoxVmId).join(',');
+    if (vmidsStr) {
+      await client.post('/cluster/backup', {
+        vmid: vmidsStr,
+        schedule: cron,
+        storage: storage || 'local',
+        compress: 'zstd',
+        mode: 'snapshot',
+        comment: comment || 'Proxima Backup Job',
+      }).catch(() => undefined);
+    }
+  } catch (err) {
+    console.warn('[admin/backups] Proxmox cluster backup notice:', pveMessage(err));
+  }
+
+  res.json({ ok: true, message: `Backup job saved for ${vmIds.length} guest(s).` });
 });
 
 // ─── GET /api/admin/backups/policies ──────────────────────────

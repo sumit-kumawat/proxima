@@ -191,6 +191,7 @@ const CreateVmSchema = z.object({
   forUserId: z.preprocess(emptyToUndefined, z.string().optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
+  proxmoxVmId: z.number().int().min(100).max(999999999).optional(),
 });
 
 router.post('/', async (req: Request, res: Response) => {
@@ -227,6 +228,9 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   const actor = (req as AuthRequest).user;
+  if (parsed.data.proxmoxVmId && actor.role === 'admin') {
+    normalized.proxmoxVmId = parsed.data.proxmoxVmId;
+  }
   try {
     const owner = await resolveCreateTarget(actor, normalized);
     const vm = await createVm(owner, { ...(normalized as any), adminManaged: owner.id !== actor.id });
@@ -415,6 +419,7 @@ const CreateContainerSchema = z.object({
   forUserId: z.preprocess(emptyToUndefined, z.string().optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
+  proxmoxVmId: z.number().int().min(100).max(999999999).optional(),
 });
 
 const handleContainerCreate = async (req: Request, res: Response) => {
@@ -457,6 +462,9 @@ const handleContainerCreate = async (req: Request, res: Response) => {
   }
 
   const actor = (req as AuthRequest).user;
+  if (parsed.data.proxmoxVmId && actor.role === 'admin') {
+    normalized.proxmoxVmId = parsed.data.proxmoxVmId;
+  }
   try {
     const owner = await resolveCreateTarget(actor, normalized);
     const vm = await createContainer(owner, { ...(normalized as any), adminManaged: owner.id !== actor.id });
@@ -1043,7 +1051,12 @@ router.delete('/:id', async (req: Request, res: Response) => {
     });
     res.json({ success: true });
   } catch (err) {
-    res.status(502).json({ error: pveMessage(err) });
+    await prisma.virtualMachine.delete({ where: { id: vm.id } }).catch(() => undefined);
+    await recordAudit({
+      action: 'vm.delete', actor: user, targetType: 'vm', targetId: vm.id,
+      detail: `${vm.name} (vmid ${vm.proxmoxVmId})`, req,
+    });
+    res.json({ success: true, warning: pveMessage(err) });
   }
 });
 

@@ -89,6 +89,7 @@ const DeploySchema = z.object({
   forUserId: z.preprocess(emptyToUndefined, z.string().min(1).max(64).optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
+  proxmoxVmId: z.number().int().min(100).max(999999999).optional(),
 });
 
 router.post('/deploy', async (req: Request, res: Response) => {

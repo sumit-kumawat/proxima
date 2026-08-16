@@ -99,6 +99,7 @@ export default function NewVmWizard() {
 
   const [source, setSource] = useState<string>(CUSTOM);
   const [name, setName] = useState("");
+  const [customVmId, setCustomVmId] = useState("");
   const [cpu, setCpu] = useState(1);
   const [ramGb, setRamGb] = useState(2);
   const [storageGb, setStorageGb] = useState(CUSTOM_DISK_DEFAULT);
@@ -136,6 +137,7 @@ export default function NewVmWizard() {
   }, [isAdmin, meId]);
 
   useEffect(() => {
+    setLoading(true);
     Promise.all([
       api.get<MeResponse>("/auth/me"),
       api.get<ProxmoxIso[]>("/proxmox/isos"),
@@ -165,7 +167,12 @@ export default function NewVmWizard() {
         setUserMe(meRes.data);
         setIsos(isoRes.data);
         setLxcTemplates(lxcRes);
-        const pub = tplRes.data;
+        const rawTpls = tplRes.data;
+        const pub: Template[] = Array.isArray(rawTpls)
+          ? rawTpls
+          : Array.isArray((rawTpls as any)?.templates)
+          ? (rawTpls as any).templates
+          : [];
         setTemplates(pub);
         setSavedKeys(sshRes);
         setRestoreEnabled(restoreOk);
@@ -400,6 +407,7 @@ export default function NewVmWizard() {
             payload.countQuota = countQuota;
           }
           if (nodeChoice !== AUTO_NODE) payload.node = nodeChoice;
+          if (customVmId.trim()) payload.proxmoxVmId = Number(customVmId.trim());
         }
         const res = await api.post<{ vm: VirtualMachine }>("/vms", payload);
         toast.success(`Virtual machine "${res.data.vm.name}" created.`);
@@ -424,6 +432,7 @@ export default function NewVmWizard() {
             payload.countQuota = countQuota;
           }
           if (nodeChoice !== AUTO_NODE) payload.node = nodeChoice;
+          if (customVmId.trim()) payload.proxmoxVmId = Number(customVmId.trim());
         }
         const res = await api.post<{ vm: VirtualMachine }>("/vms/lxc", payload);
         toast.success(`Container "${res.data.vm.name}" created.`);
@@ -440,9 +449,12 @@ export default function NewVmWizard() {
           username: username.trim() || undefined,
           cloudInitFeatures: selectedFeatures.length ? selectedFeatures : undefined,
         };
-        if (isAdmin && forUserId !== SELF) {
-          payload.forUserId = forUserId;
-          payload.countQuota = countQuota;
+        if (isAdmin) {
+          if (forUserId !== SELF) {
+            payload.forUserId = forUserId;
+            payload.countQuota = countQuota;
+          }
+          if (customVmId.trim()) payload.proxmoxVmId = Number(customVmId.trim());
         }
         const res = await api.post<{ vm: VirtualMachine }>("/templates/deploy", payload);
         toast.success(`Virtual machine "${res.data.vm.name}" deployed.`);
@@ -598,7 +610,7 @@ export default function NewVmWizard() {
                     </Select>
                   </FormField>
 
-                  {isAdmin && (
+                  {isAdmin ? (
                     <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-xs">
                       <div className="flex items-center gap-1.5 font-medium">
                         <Rocket className="size-3.5 text-primary" /> Admin options
@@ -618,6 +630,23 @@ export default function NewVmWizard() {
                           </SelectContent>
                         </Select>
                       </FormField>
+
+                      <FormField label="Custom Proxmox VMID (Admin Only)" hint="Specify a numerical VMID (e.g. 105, 200). Leave blank to auto-allocate.">
+                        <Input
+                          type="number"
+                          min={100}
+                          max={999999999}
+                          value={customVmId}
+                          onChange={(e) => setCustomVmId(e.target.value)}
+                          placeholder="Auto-allocated by cluster (e.g. 105)"
+                          className="font-mono text-xs"
+                        />
+                      </FormField>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between p-3 rounded-md border bg-muted/20 text-xs">
+                      <span className="text-muted-foreground font-medium">Proxmox VMID Assignment:</span>
+                      <Badge variant="outline" className="font-mono text-[10px]">Auto-Allocated by Cluster</Badge>
                     </div>
                   )}
                 </div>
