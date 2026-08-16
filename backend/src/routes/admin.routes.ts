@@ -749,7 +749,16 @@ router.delete('/isolation/enforce', async (_req: Request, res: Response) => {
 // Every VM on the cluster, grouped by owner (admin first, then users by
 // signup order). Used by the admin monitor dashboard.
 
-router.get('/all-vms', async (_req: Request, res: Response) => {
+router.get('/all-vms', async (req: Request, res: Response) => {
+  const adminUser = (req as any).user;
+  if (adminUser?.id) {
+    try {
+      await syncExistingProxmoxInfrastructure(adminUser.id);
+    } catch {
+      // Best effort auto sync of Proxmox cluster resources
+    }
+  }
+
   const users = await prisma.user.findMany({
     include: { vms: { orderBy: { createdAt: 'desc' } } },
     orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],

@@ -13,8 +13,8 @@ module.exports = {
     },
     {
       name: 'proxima-frontend',
-      script: 'node_modules/next/dist/bin/next',
-      args: 'start frontend -p 3000',
+      script: './frontend/node_modules/next/dist/bin/next',
+      args: 'start ./frontend -p 3000',
       cwd: './',
       env: {
         NODE_ENV: 'production',

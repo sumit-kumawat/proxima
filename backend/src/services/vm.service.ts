@@ -1749,19 +1749,34 @@ export async function syncExistingProxmoxInfrastructure(adminUserId: string): Pr
   }
 
   // Get all currently registered VM IDs in Proxima
-  const existingVms = await prisma.virtualMachine.findMany({ select: { proxmoxVmId: true } });
-  const registeredVmIds = new Set(existingVms.map((v) => v.proxmoxVmId));
+  const existingVms = await prisma.virtualMachine.findMany({ select: { id: true, proxmoxVmId: true, status: true, proxmoxNode: true } });
+  const registeredVmMap = new Map(existingVms.map((v) => [v.proxmoxVmId, v]));
 
   let importedCount = 0;
 
   for (const res of discovered) {
-    if (!res.vmid || registeredVmIds.has(res.vmid)) continue;
+    if (!res.vmid) continue;
 
     const guestType = res.type === 'lxc' ? 'lxc' : 'qemu';
+    const initialStatus = res.status === 'running' ? 'running' : 'stopped';
+
+    if (registeredVmMap.has(res.vmid)) {
+      const existing = registeredVmMap.get(res.vmid)!;
+      if (existing.status !== initialStatus || existing.proxmoxNode !== (res.node || existing.proxmoxNode)) {
+        await prisma.virtualMachine.update({
+          where: { id: existing.id },
+          data: {
+            status: initialStatus,
+            proxmoxNode: res.node || existing.proxmoxNode,
+          },
+        }).catch(() => undefined);
+      }
+      continue;
+    }
+
     const cpuCores = res.maxcpu || 1;
     const ramMb = res.maxmem ? Math.max(512, Math.round(res.maxmem / (1024 * 1024))) : 1024;
     const storageGb = res.maxdisk ? Math.max(10, Math.round(res.maxdisk / (1024 * 1024 * 1024))) : 20;
-    const initialStatus = res.status === 'running' ? 'running' : 'stopped';
     const vmName = res.name || `${guestType.toUpperCase()}-${res.vmid}`;
 
     await prisma.virtualMachine.create({
