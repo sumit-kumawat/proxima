@@ -461,7 +461,7 @@ export default function SettingsPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <PageHeader title="Settings" />
         <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Loading…
@@ -471,7 +471,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Settings"
         description="Manage your Proxima server — Proxmox connection, the IDE, notifications, access, and maintenance."

@@ -439,7 +439,7 @@ export default function VmDetailPage() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <Button variant="ghost" render={<Link href="/vms" />} className="mb-4">
           <ArrowLeft /> Back to VMs
         </Button>
@@ -452,7 +452,7 @@ export default function VmDetailPage() {
 
   if (!vm) {
     return (
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <Skeleton className="mb-6 h-9 w-48" />
         <Skeleton className="mb-4 h-10 w-full max-w-md" />
         <Skeleton className="h-64" />
@@ -494,7 +494,7 @@ export default function VmDetailPage() {
     (tab === "backups" && !canBackups) || (tab === "settings" && !canConfigure) ? "overview" : tab;
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <Button variant="ghost" render={<Link href="/vms" />} className="mb-4">
         <ArrowLeft /> Back to VMs
       </Button>

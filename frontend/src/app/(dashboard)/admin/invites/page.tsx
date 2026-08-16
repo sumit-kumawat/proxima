@@ -228,7 +228,7 @@ export default function InvitesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader title="Invites" description="Generate invite links with embedded resource quotas." />
 
       <Card className="mb-6">

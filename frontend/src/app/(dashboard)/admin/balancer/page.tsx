@@ -139,7 +139,7 @@ export default function BalancerPage() {
       parseExclude().join(",") !== data.settings.exclude.join(","));
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Cluster Balancer"
         description="Even out node memory load by live-migrating Proxima-managed guests — DRS-style, with architecture and anti-affinity guardrails."

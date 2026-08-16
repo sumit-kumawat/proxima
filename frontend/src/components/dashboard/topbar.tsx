@@ -171,7 +171,10 @@ function GlobalSearchBox() {
                 <Link
                   key={item.id}
                   href={item.href}
-                  onClick={() => setOpen(false)}
+                  onClick={() => {
+                    setQuery("");
+                    setOpen(false);
+                  }}
                   className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-xs transition-colors hover:bg-accent hover:text-accent-foreground"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">

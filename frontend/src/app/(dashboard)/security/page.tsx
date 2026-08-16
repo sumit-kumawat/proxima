@@ -213,7 +213,7 @@ export default function SecurityPage() {
   }
 
   return (
-    <div className="mx-auto max-w-xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader title="Security" description="Protect your account with two-factor authentication." />
 
       {mfaRequired && (

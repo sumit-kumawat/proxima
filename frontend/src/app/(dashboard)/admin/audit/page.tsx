@@ -57,7 +57,7 @@ export default function AuditPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Audit Log"
         description="Who did what, and when — VM lifecycle, backups, and sign-ins across all tenants."

@@ -54,9 +54,9 @@ export async function resolveSiteOrigin(): Promise<string> {
 export const siteConfig = {
   name: "Proxima",
   // Punchy line for OG/Twitter cards (renders fully in small thumbnails).
-  shortDescription: "Invite-only cloud dashboard for Proxmox VE.",
+  shortDescription: "Next-Gen High Performance Cloud Infrastructure Control Plane for Proxmox VE.",
   // ~125 chars — survives intact in search/preview snippets.
   description:
-    "Self-hosted, invite-only cloud dashboard for Proxmox VE. Spin up VMs and share your homelab — without handing over the keys.",
-  tagline: "Share your homelab. Keep your boundaries.",
+    "Next-Gen High Performance Cloud Infrastructure Control Plane for Proxmox VE. Effortlessly manage, discover, and scale virtual machines and containers.",
+  tagline: "Next-Gen High Performance Cloud Infrastructure Control Plane for Proxmox VE",
 } as const;

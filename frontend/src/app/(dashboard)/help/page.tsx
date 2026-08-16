@@ -44,7 +44,7 @@ export default function HelpPage() {
   const isAdmin = role === "admin";
 
   return (
-    <div className="mx-auto max-w-4xl pb-8">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pb-8">
       <PageHeader
         title="Help & Docs"
         description="Guides for getting your VM online and reaching it from outside Proxima."

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Plus, MonitorPlay, Play, Square, RotateCw, X, Trash2, Loader2, Box, Cpu } from "lucide-react";
+import { Plus, MonitorPlay, Play, Square, RotateCw, Trash2, Loader2, Box, Cpu, Users, Search, Check } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import type { VirtualMachine, UserGroup } from "@/lib/types";
@@ -25,6 +25,12 @@ import {
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -40,9 +46,6 @@ export function parseTags(csv: string | null): string[] {
   return (csv ?? "").split(",").map((t) => t.trim()).filter(Boolean);
 }
 
-/**
- * Bulk-delete confirmation.
- */
 function BulkDeleteDialog({ count, busy, onConfirm }: { count: number; busy: boolean; onConfirm: () => void }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
@@ -116,7 +119,83 @@ interface Selection {
   toggle: (id: string) => void;
 }
 
-/** The VM table, reused for each owner group (admin) and the user's own list. */
+/** Searchable User Dropdown Component for Admins */
+function UserSelectDropdown({
+  groups,
+  selectedUserId,
+  onSelectUser,
+}: {
+  groups: UserGroup[];
+  selectedUserId: string | null;
+  onSelectUser: (id: string | null) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const selectedUser = groups.find((g) => g.id === selectedUserId);
+  const filteredGroups = groups.filter(
+    (g) =>
+      g.displayName.toLowerCase().includes(search.toLowerCase()) ||
+      g.email.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        render={
+          <Button variant="outline" size="sm" className="gap-2 text-xs">
+            <Users className="size-3.5 text-primary" />
+            <span className="font-medium">
+              {selectedUserId === null ? "All Users & Owners" : selectedUser?.displayName || "Selected User"}
+            </span>
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="start" className="w-64 p-2">
+        <div className="relative mb-2">
+          <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          <Input
+            type="text"
+            placeholder="Search tenant user..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 pl-8 text-xs"
+          />
+        </div>
+        <div className="max-h-48 overflow-y-auto space-y-0.5">
+          <DropdownMenuItem
+            onClick={() => {
+              onSelectUser(null);
+              setOpen(false);
+            }}
+            className="flex items-center justify-between text-xs cursor-pointer"
+          >
+            <span>All Users ({groups.reduce((n, g) => n + g.vms.length, 0)} VMs)</span>
+            {selectedUserId === null && <Check className="size-3.5 text-primary" />}
+          </DropdownMenuItem>
+          {filteredGroups.map((g) => (
+            <DropdownMenuItem
+              key={g.id}
+              onClick={() => {
+                onSelectUser(g.id);
+                setOpen(false);
+              }}
+              className="flex items-center justify-between text-xs cursor-pointer"
+            >
+              <div className="truncate">
+                <div className="font-medium text-foreground truncate">{g.displayName}</div>
+                <div className="text-[10px] text-muted-foreground truncate">{g.email}</div>
+              </div>
+              {selectedUserId === g.id && <Check className="size-3.5 text-primary shrink-0" />}
+            </DropdownMenuItem>
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The VM table with STICKY STATIC HEADER and scrollable body rows. */
 function VmTable({
   vms,
   selection,
@@ -127,81 +206,82 @@ function VmTable({
   onTagClick?: (t: string) => void;
 }) {
   return (
-    <Table className="min-w-[56rem] table-fixed">
-      <TableHeader>
-        <TableRow>
-          {selection && <TableHead className="w-8" />}
-          <TableHead className="w-[24%]">Name</TableHead>
-          <TableHead className="w-[12%]">Status</TableHead>
-          <TableHead className="w-[22%]">Specs</TableHead>
-          <TableHead className="w-[18%]">OS</TableHead>
-          <TableHead className="w-[14%]">IP Address</TableHead>
-          <TableHead className="w-[10%]">Created</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {vms.map((vm) => (
-          <TableRow key={vm.id}>
-            {selection && (
-              <TableCell>
-                <input
-                  type="checkbox"
-                  aria-label={`Select ${vm.name}`}
-                  checked={selection.selected.has(vm.id)}
-                  onChange={() => selection.toggle(vm.id)}
-                  className="size-4 align-middle accent-primary"
-                />
-              </TableCell>
-            )}
-            <TableCell className="overflow-hidden">
-              <Link
-                href={`/vms/${vm.id}`}
-                className="font-medium hover:underline align-middle inline-block max-w-full truncate text-foreground"
-                title={vm.name}
-              >
-                {vm.name}
-              </Link>
-              {vm.type === "lxc" && (
-                <span className="ml-2 inline-flex items-center gap-1 align-middle rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  <Box className="size-2.5" /> LXC
-                </span>
-              )}
-              {vm.hasPassthrough && (
-                <span className="ml-2 inline-flex items-center gap-1 align-middle rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
-                  <Cpu className="size-2.5" /> GPU/PCI
-                </span>
-              )}
-              {vm.access && vm.access !== "owner" && vm.access !== "admin" && (
-                <span className="ml-2 align-middle rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  Shared · {vm.access}
-                </span>
-              )}
-              <TagChips tags={parseTags(vm.tags)} onClick={onTagClick} />
-            </TableCell>
-            <TableCell>
-              <VmStatusBadge status={vm.status} />
-            </TableCell>
-            <TableCell className="truncate text-muted-foreground">
-              {vm.cpu} vCPU · {formatRam(vm.ram)} · {vm.storage} GB
-            </TableCell>
-            <TableCell className="overflow-hidden text-muted-foreground">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <TemplateIcon os={vm.os} name={vm.os} className="size-4 shrink-0" />
-                <span className="truncate font-medium text-foreground/90" title={formatOsName(vm.os)}>
-                  {formatOsName(vm.os)}
-                </span>
-              </span>
-            </TableCell>
-            <TableCell className="truncate font-mono text-xs text-foreground/90">{vm.ipAddress ?? "—"}</TableCell>
-            <TableCell className="truncate text-muted-foreground">{formatDate(vm.createdAt)}</TableCell>
+    <div className="max-h-[calc(100vh-320px)] overflow-y-auto border rounded-md">
+      <Table className="min-w-[56rem] table-fixed relative">
+        <TableHeader className="sticky top-0 bg-background z-20 border-b border-border shadow-xs">
+          <TableRow className="bg-muted/40 hover:bg-muted/40">
+            {selection && <TableHead className="w-8" />}
+            <TableHead className="w-[24%]">Name</TableHead>
+            <TableHead className="w-[12%]">Status</TableHead>
+            <TableHead className="w-[22%]">Specs</TableHead>
+            <TableHead className="w-[18%]">OS</TableHead>
+            <TableHead className="w-[14%]">IP Address</TableHead>
+            <TableHead className="w-[10%]">Created</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {vms.map((vm) => (
+            <TableRow key={vm.id}>
+              {selection && (
+                <TableCell>
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${vm.name}`}
+                    checked={selection.selected.has(vm.id)}
+                    onChange={() => selection.toggle(vm.id)}
+                    className="size-4 align-middle accent-primary"
+                  />
+                </TableCell>
+              )}
+              <TableCell className="overflow-hidden">
+                <Link
+                  href={`/vms/${vm.id}`}
+                  className="font-medium hover:underline align-middle inline-block max-w-full truncate text-foreground"
+                  title={vm.name}
+                >
+                  {vm.name}
+                </Link>
+                {vm.type === "lxc" && (
+                  <span className="ml-2 inline-flex items-center gap-1 align-middle rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    <Box className="size-2.5" /> LXC
+                  </span>
+                )}
+                {vm.hasPassthrough && (
+                  <span className="ml-2 inline-flex items-center gap-1 align-middle rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
+                    <Cpu className="size-2.5" /> GPU/PCI
+                  </span>
+                )}
+                {vm.access && vm.access !== "owner" && vm.access !== "admin" && (
+                  <span className="ml-2 align-middle rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    Shared · {vm.access}
+                  </span>
+                )}
+                <TagChips tags={parseTags(vm.tags)} onClick={onTagClick} />
+              </TableCell>
+              <TableCell>
+                <VmStatusBadge status={vm.status} />
+              </TableCell>
+              <TableCell className="truncate text-muted-foreground">
+                {vm.cpu} vCPU · {formatRam(vm.ram)} · {vm.storage} GB
+              </TableCell>
+              <TableCell className="overflow-hidden text-muted-foreground">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <TemplateIcon os={vm.os} name={vm.os} className="size-4 shrink-0" />
+                  <span className="truncate font-medium text-foreground/90" title={formatOsName(vm.os)}>
+                    {formatOsName(vm.os)}
+                  </span>
+                </span>
+              </TableCell>
+              <TableCell className="truncate font-mono text-xs text-foreground/90">{vm.ipAddress ?? "—"}</TableCell>
+              <TableCell className="truncate text-muted-foreground">{formatDate(vm.createdAt)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
-/** The user's own VM list: tag filter + multi-select + bulk power/delete actions. */
 function OwnVmList({ vms, reload }: { vms: VirtualMachine[]; reload: () => Promise<void> }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeTag, setActiveTag] = useState<string | null>(null);
@@ -303,6 +383,7 @@ export default function VmsPage() {
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
   const [vms, setVms] = useState<VirtualMachine[] | null>(null);
   const [groups, setGroups] = useState<UserGroup[] | null>(null);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncingInfra, setSyncingInfra] = useState(false);
 
@@ -339,7 +420,15 @@ export default function VmsPage() {
     }
   }, [isAdmin, reloadOwn]);
 
-  const ownerGroups = groups?.filter((g) => g.vms.length > 0) ?? [];
+  const ownerGroups = useMemo(() => {
+    if (!groups) return [];
+    const list = groups.filter((g) => g.vms.length > 0);
+    if (selectedUserId) {
+      return list.filter((g) => g.id === selectedUserId);
+    }
+    return list;
+  }, [groups, selectedUserId]);
+
   const totalVms = groups?.reduce((n, g) => n + g.vms.length, 0) ?? 0;
 
   const allVmsList: VirtualMachine[] = useMemo(() => {
@@ -362,6 +451,13 @@ export default function VmsPage() {
         title="Virtual Machines"
         description={isAdmin ? "Every VM on the cluster, separated by owner." : "Your virtual machines."}
       >
+        {isAdmin && groups && groups.length > 1 && (
+          <UserSelectDropdown
+            groups={groups}
+            selectedUserId={selectedUserId}
+            onSelectUser={setSelectedUserId}
+          />
+        )}
         {isAdmin && (
           <Button variant="outline" onClick={handleSyncInfra} disabled={syncingInfra}>
             {syncingInfra ? <Loader2 className="animate-spin" /> : <RotateCw />}
@@ -376,19 +472,19 @@ export default function VmsPage() {
 
       {/* Realtime Power Status Counter Cards */}
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Card className="p-4 shadow-sm border-border">
+        <Card className="p-4 shadow-xs border-border">
           <div className="text-xs font-medium text-muted-foreground">Total Guests</div>
           <div className="mt-1 text-2xl font-bold text-foreground">{allVmsList.length}</div>
         </Card>
-        <Card className="p-4 shadow-sm border-emerald-500/30 bg-emerald-500/5">
+        <Card className="p-4 shadow-xs border-emerald-500/30 bg-emerald-500/5">
           <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Running (Powered On)</div>
           <div className="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-400">{runningCount}</div>
         </Card>
-        <Card className="p-4 shadow-sm border-slate-500/30 bg-slate-500/5">
+        <Card className="p-4 shadow-xs border-slate-500/30 bg-slate-500/5">
           <div className="text-xs font-medium text-muted-foreground">Stopped (Powered Off)</div>
           <div className="mt-1 text-2xl font-bold text-muted-foreground">{stoppedCount}</div>
         </Card>
-        <Card className="p-4 shadow-sm border-amber-500/30 bg-amber-500/5">
+        <Card className="p-4 shadow-xs border-amber-500/30 bg-amber-500/5">
           <div className="text-xs font-medium text-amber-600 dark:text-amber-400">Paused / Suspended</div>
           <div className="mt-1 text-2xl font-bold text-amber-600 dark:text-amber-400">{pausedCount}</div>
         </Card>
@@ -418,7 +514,7 @@ export default function VmsPage() {
       ) : isAdmin ? (
         <div className="grid gap-6">
           {ownerGroups.map((g) => (
-            <Card key={g.id} className="p-4 shadow-sm">
+            <Card key={g.id} className="p-4 shadow-xs">
               <OwnerGroupHeader group={g} />
               <div className="mt-3">
                 <VmTable vms={g.vms} />

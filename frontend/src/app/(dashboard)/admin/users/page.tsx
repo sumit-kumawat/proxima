@@ -152,7 +152,7 @@ export default function UsersPage() {
   const pendingByUser = new Set(requests.map((r) => r.userId));
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader title="Users" description="Manage accounts and quotas, and review per-tenant usage." />
 
       <div className="mb-4 inline-flex rounded-lg border bg-muted/40 p-0.5 text-sm">
