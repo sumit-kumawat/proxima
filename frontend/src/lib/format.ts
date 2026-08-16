@@ -59,3 +59,22 @@ export function usedPercent(used: number, max: number): number {
   if (max <= 0) return used > 0 ? 100 : 0;
   return Math.min(100, Math.round((used / max) * 100));
 }
+
+/** Cleanly format raw OS identifiers (e.g. qemu-discovered -> QEMU Guest, lxc-discovered -> LXC Container, ISO filenames). */
+export function formatOsName(os?: string | null): string {
+  if (!os) return "Linux";
+  const s = os.trim().toLowerCase();
+  if (s === "qemu-discovered") return "QEMU Guest (Linux)";
+  if (s === "lxc-discovered") return "LXC Container (Linux)";
+  if (s.includes("ubuntu")) return "Ubuntu Linux";
+  if (s.includes("debian")) return "Debian Linux";
+  if (s.includes("alpine")) return "Alpine Linux";
+  if (s.includes("centos") || s.includes("rhel") || s.includes("rocky") || s.includes("alma")) return "Enterprise Linux";
+  if (s.includes("fedora")) return "Fedora Linux";
+  if (s.includes("arch")) return "Arch Linux";
+  if (s.includes("win")) return "Windows OS";
+  if (s.endsWith(".iso") || s.endsWith(".img")) {
+    return os.replace(/\.(iso|img)$/i, "").replace(/[-_]/g, " ");
+  }
+  return os;
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Cpu, MemoryStick, HardDrive, Plus, MonitorPlay } from "lucide-react";
 import { api, apiError } from "@/lib/api";
@@ -12,7 +12,7 @@ import { QuotaCard } from "@/components/dashboard/quota-card";
 import { ClusterLoadCard } from "@/components/dashboard/cluster-load-card";
 import { LiveUsageCard } from "@/components/dashboard/live-usage-card";
 import { RequestQuotaDialog } from "@/components/dashboard/request-quota-dialog";
-import { OwnerGroupHeader } from "@/components/dashboard/owner-group-header";
+import { RealtimeNetGraph } from "@/components/dashboard/realtime-net-graph";
 import { VmStatusBadge } from "@/components/vm/vm-status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -110,16 +110,13 @@ export default function DashboardPage() {
     };
   }, [isAdmin]);
 
-  const ownerGroups = groups?.filter((g) => g.vms.length > 0) ?? [];
-  const totalVms = groups?.reduce((n, g) => n + g.vms.length, 0) ?? 0;
-
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Dashboard"
         description={
           isAdmin
-            ? "Live cluster load and every VM, grouped by who's running it."
+            ? "Realtime cluster capacity and live network traffic metrics."
             : "Your resource usage and virtual machines at a glance."
         }
       >
@@ -161,84 +158,15 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Live current-usage sparklines for users (admins get the cluster trends above) */}
+      {/* Live current-usage sparklines for users */}
       {!isAdmin && me && (
         <div className="mt-4">
           <LiveUsageCard quota={me.quota} />
         </div>
       )}
 
-      {/* VMs: grouped by owner for admins, a recent list for users */}
-      {isAdmin ? (
-        <Card className="mt-6">
-          <CardHeader>
-            <CardTitle>Virtual machines by owner</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {groups === null ? (
-              <div className="grid gap-2">
-                <Skeleton className="h-10" />
-                <Skeleton className="h-10" />
-              </div>
-            ) : totalVms === 0 ? (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <MonitorPlay className="size-8 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">No VMs on the cluster yet.</p>
-                <Button render={<Link href="/vms/new" />} variant="outline">
-                  <Plus />
-                  Create your first VM
-                </Button>
-              </div>
-            ) : (
-              <div className="grid gap-6">
-                {ownerGroups.map((g) => (
-                  <section key={g.id} className="grid gap-1">
-                    <OwnerGroupHeader group={g} />
-                    <ul className="divide-y">
-                      {g.vms.map((vm) => (
-                        <li key={vm.id}>
-                          <VmRow vm={vm} />
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <Card className="mt-6">
-          <CardHeader>
-            <CardTitle>Recent virtual machines</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {vms === null ? (
-              <div className="grid gap-2">
-                <Skeleton className="h-10" />
-                <Skeleton className="h-10" />
-              </div>
-            ) : vms.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <MonitorPlay className="size-8 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">You don&apos;t have any VMs yet.</p>
-                <Button render={<Link href="/vms/new" />} variant="outline">
-                  <Plus />
-                  Create your first VM
-                </Button>
-              </div>
-            ) : (
-              <ul className="divide-y">
-                {vms.slice(0, 6).map((vm) => (
-                  <li key={vm.id}>
-                    <VmRow vm={vm} />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {/* Realtime Network Traffic Graph replacing the owner list */}
+      <RealtimeNetGraph />
     </div>
   );
 }

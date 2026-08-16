@@ -1,4 +1,8 @@
+"use client";
+
 import React from "react";
+import Link from "next/link";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface BrandLogoProps {
@@ -8,13 +12,18 @@ interface BrandLogoProps {
 }
 
 export function BrandLogo({ className, imageClassName, showText = false }: BrandLogoProps) {
+  const handleClick = () => {
+    // Trigger background infrastructure sync on click
+    api.post("/admin/infra/sync").catch(() => {});
+  };
+
   return (
-    <div className={cn("inline-flex items-center gap-2.5", className)}>
-      {/* 
-        The logo is dark text/graphic. 
-        In light mode (or on transparent cards on light bg), it remains transparent.
-        In dark mode, it automatically renders inside a clean white card background to stay visible.
-      */}
+    <Link
+      href="/"
+      onClick={handleClick}
+      className={cn("inline-flex items-center gap-2.5 hover:opacity-95 transition-opacity cursor-pointer", className)}
+      title="Proxima — Refresh Dashboard & Sync Infra"
+    >
       <div className="flex items-center justify-center rounded-lg p-2 transition-colors bg-transparent dark:bg-white dark:shadow-sm">
         <img
           src="/DarkLogo.png"
@@ -23,17 +32,19 @@ export function BrandLogo({ className, imageClassName, showText = false }: Brand
         />
       </div>
       {showText && <span className="font-semibold text-lg tracking-tight">Proxima</span>}
-    </div>
+    </Link>
   );
 }
 
 export function BrandIcon({ className, size = 32 }: { className?: string; size?: number }) {
   return (
-    <img
-      src="/icon-rounded.png"
-      alt="Proxima Icon"
-      style={{ width: size, height: size }}
-      className={cn("rounded-lg object-contain shrink-0", className)}
-    />
+    <Link href="/" className="inline-block hover:opacity-90 transition-opacity">
+      <img
+        src="/icon-rounded.png"
+        alt="Proxima Icon"
+        style={{ width: size, height: size }}
+        className={cn("rounded-lg object-contain shrink-0", className)}
+      />
+    </Link>
   );
 }

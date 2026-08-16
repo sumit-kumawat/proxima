@@ -7,7 +7,7 @@ import { Plus, MonitorPlay, Play, Square, RotateCw, X, Trash2, Loader2, Box, Cpu
 import { api, apiError } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import type { VirtualMachine, UserGroup } from "@/lib/types";
-import { formatRam, formatDate } from "@/lib/format";
+import { formatRam, formatDate, formatOsName } from "@/lib/format";
 import { PageHeader } from "@/components/dashboard/page-header";
 import { OwnerGroupHeader } from "@/components/dashboard/owner-group-header";
 import { VmStatusBadge } from "@/components/vm/vm-status-badge";
@@ -41,9 +41,7 @@ export function parseTags(csv: string | null): string[] {
 }
 
 /**
- * Bulk-delete confirmation. Destroying several VMs at once is a footgun, so this
- * gates it behind a *typed* confirmation: the Delete button stays disabled until
- * the user types the exact number of selected VMs.
+ * Bulk-delete confirmation.
  */
 function BulkDeleteDialog({ count, busy, onConfirm }: { count: number; busy: boolean; onConfirm: () => void }) {
   const [open, setOpen] = useState(false);
@@ -60,20 +58,23 @@ function BulkDeleteDialog({ count, busy, onConfirm }: { count: number; busy: boo
       />
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete {count} VM{count === 1 ? "" : "s"}?</AlertDialogTitle>
+          <AlertDialogTitle>Delete {count} virtual machines?</AlertDialogTitle>
           <AlertDialogDescription>
-            This permanently destroys each selected VM and its disk on Proxmox — this cannot be undone.
-            Type <strong>{count}</strong> below to confirm.
+            This permanently destroys all selected VMs, their disks, and their snapshots on Proxmox.
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <Input
-          autoFocus
-          inputMode="numeric"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={`Type ${count} to confirm`}
-          aria-label="Type the number of VMs to confirm deletion"
-        />
+        <div className="py-2">
+          <label htmlFor="bulk-delete-confirm-input" className="block text-xs font-medium text-muted-foreground mb-1.5">
+            Type <span className="font-mono text-foreground font-semibold">{count}</span> to confirm:
+          </label>
+          <Input
+            id="bulk-delete-confirm-input"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={String(count)}
+            className="font-mono text-sm"
+          />
+        </div>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
@@ -126,23 +127,16 @@ function VmTable({
   onTagClick?: (t: string) => void;
 }) {
   return (
-    // Fixed layout + explicit column widths so every owner group's grid lines up
-    // top-to-bottom (an auto table sizes columns to its own content, so the
-    // boundaries drift between sections). Cells are `whitespace-nowrap` (table.tsx),
-    // so the min-width has to be wide enough to hold each column's single line —
-    // below it the wrapper's overflow-x-auto scrolls horizontally instead of cells
-    // painting over each other. Long values additionally `truncate` per-cell so a
-    // wider-than-usual value clips with an ellipsis rather than bleeding sideways.
     <Table className="min-w-[56rem] table-fixed">
       <TableHeader>
         <TableRow>
           {selection && <TableHead className="w-8" />}
           <TableHead className="w-[24%]">Name</TableHead>
-          <TableHead className="w-[11%]">Status</TableHead>
-          <TableHead className="w-[18%]">Resources</TableHead>
-          <TableHead className="w-[16%]">OS</TableHead>
-          <TableHead className="w-[14%]">IP address</TableHead>
-          <TableHead className="w-[17%]">Created</TableHead>
+          <TableHead className="w-[12%]">Status</TableHead>
+          <TableHead className="w-[22%]">Specs</TableHead>
+          <TableHead className="w-[18%]">OS</TableHead>
+          <TableHead className="w-[14%]">IP Address</TableHead>
+          <TableHead className="w-[10%]">Created</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -162,7 +156,7 @@ function VmTable({
             <TableCell className="overflow-hidden">
               <Link
                 href={`/vms/${vm.id}`}
-                className="font-medium hover:underline align-middle inline-block max-w-full truncate"
+                className="font-medium hover:underline align-middle inline-block max-w-full truncate text-foreground"
                 title={vm.name}
               >
                 {vm.name}
@@ -193,12 +187,12 @@ function VmTable({
             <TableCell className="overflow-hidden text-muted-foreground">
               <span className="flex min-w-0 items-center gap-1.5">
                 <TemplateIcon os={vm.os} name={vm.os} className="size-4 shrink-0" />
-                <span className="truncate" title={vm.os}>
-                  {vm.os}
+                <span className="truncate font-medium text-foreground/90" title={formatOsName(vm.os)}>
+                  {formatOsName(vm.os)}
                 </span>
               </span>
             </TableCell>
-            <TableCell className="truncate text-muted-foreground">{vm.ipAddress ?? "—"}</TableCell>
+            <TableCell className="truncate font-mono text-xs text-foreground/90">{vm.ipAddress ?? "—"}</TableCell>
             <TableCell className="truncate text-muted-foreground">{formatDate(vm.createdAt)}</TableCell>
           </TableRow>
         ))}
@@ -258,34 +252,40 @@ function OwnVmList({ vms, reload }: { vms: VirtualMachine[]; reload: () => Promi
               key={t}
               type="button"
               onClick={() => setActiveTag((cur) => (cur === t ? null : t))}
-              aria-pressed={activeTag === t}
               className={
-                "rounded-full border px-2 py-0.5 text-xs transition-colors " +
-                (activeTag === t ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted")
+                "rounded-full border px-2.5 py-0.5 text-xs transition-colors " +
+                (activeTag === t
+                  ? "border-primary bg-primary text-primary-foreground font-medium"
+                  : "bg-background text-muted-foreground hover:bg-muted")
               }
             >
               {t}
             </button>
           ))}
           {activeTag && (
-            <button type="button" onClick={() => setActiveTag(null)} className="text-xs text-muted-foreground hover:text-foreground">
-              <X className="inline size-3" /> clear
+            <button
+              type="button"
+              onClick={() => setActiveTag(null)}
+              className="text-xs text-muted-foreground hover:text-foreground underline ml-1"
+            >
+              Clear filter
             </button>
           )}
         </div>
       )}
 
       {selected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">
-          <span className="font-medium">{selected.size} selected</span>
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-2 text-xs">
+          <span className="font-semibold text-foreground px-1">{selected.size} selected</span>
+          <div className="h-4 w-px bg-border" />
           <Button size="sm" variant="outline" disabled={busy} onClick={() => runBulk("start")}>
             <Play /> Start
           </Button>
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => runBulk("stop")}>
-            <Square /> Stop
-          </Button>
           <Button size="sm" variant="outline" disabled={busy} onClick={() => runBulk("restart")}>
             <RotateCw /> Restart
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => runBulk("stop")}>
+            <Square /> Stop
           </Button>
           <BulkDeleteDialog count={selected.size} busy={busy} onConfirm={() => runBulk("delete")} />
           <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
@@ -301,8 +301,8 @@ function OwnVmList({ vms, reload }: { vms: VirtualMachine[]; reload: () => Promi
 
 export default function VmsPage() {
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
-  const [vms, setVms] = useState<VirtualMachine[] | null>(null); // user view
-  const [groups, setGroups] = useState<UserGroup[] | null>(null); // admin view
+  const [vms, setVms] = useState<VirtualMachine[] | null>(null);
+  const [groups, setGroups] = useState<UserGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncingInfra, setSyncingInfra] = useState(false);
 
@@ -342,11 +342,22 @@ export default function VmsPage() {
   const ownerGroups = groups?.filter((g) => g.vms.length > 0) ?? [];
   const totalVms = groups?.reduce((n, g) => n + g.vms.length, 0) ?? 0;
 
+  const allVmsList: VirtualMachine[] = useMemo(() => {
+    if (isAdmin) {
+      return groups?.flatMap((g) => g.vms) ?? [];
+    }
+    return vms ?? [];
+  }, [isAdmin, groups, vms]);
+
+  const runningCount = allVmsList.filter((v) => v.status === "running").length;
+  const stoppedCount = allVmsList.filter((v) => v.status === "stopped").length;
+  const pausedCount = allVmsList.filter((v) => (v.status as string) === "paused" || (v.status as string) === "suspended").length;
+
   const loading = isAdmin ? groups === null : vms === null;
   const empty = isAdmin ? totalVms === 0 : vms?.length === 0;
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Virtual Machines"
         description={isAdmin ? "Every VM on the cluster, separated by owner." : "Your virtual machines."}
@@ -363,11 +374,31 @@ export default function VmsPage() {
         </Button>
       </PageHeader>
 
+      {/* Realtime Power Status Counter Cards */}
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card className="p-4 shadow-sm border-border">
+          <div className="text-xs font-medium text-muted-foreground">Total Guests</div>
+          <div className="mt-1 text-2xl font-bold text-foreground">{allVmsList.length}</div>
+        </Card>
+        <Card className="p-4 shadow-sm border-emerald-500/30 bg-emerald-500/5">
+          <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Running (Powered On)</div>
+          <div className="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-400">{runningCount}</div>
+        </Card>
+        <Card className="p-4 shadow-sm border-slate-500/30 bg-slate-500/5">
+          <div className="text-xs font-medium text-muted-foreground">Stopped (Powered Off)</div>
+          <div className="mt-1 text-2xl font-bold text-muted-foreground">{stoppedCount}</div>
+        </Card>
+        <Card className="p-4 shadow-sm border-amber-500/30 bg-amber-500/5">
+          <div className="text-xs font-medium text-amber-600 dark:text-amber-400">Paused / Suspended</div>
+          <div className="mt-1 text-2xl font-bold text-amber-600 dark:text-amber-400">{pausedCount}</div>
+        </Card>
+      </div>
+
       {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
 
       {loading ? (
         <Card>
-          <CardContent className="grid gap-2">
+          <CardContent className="grid gap-2 py-6">
             <Skeleton className="h-10" />
             <Skeleton className="h-10" />
             <Skeleton className="h-10" />
@@ -385,22 +416,18 @@ export default function VmsPage() {
           </CardContent>
         </Card>
       ) : isAdmin ? (
-        <div className="grid gap-4">
+        <div className="grid gap-6">
           {ownerGroups.map((g) => (
-            <Card key={g.id}>
-              <CardContent className="grid gap-3">
-                <OwnerGroupHeader group={g} />
+            <Card key={g.id} className="p-4 shadow-sm">
+              <OwnerGroupHeader group={g} />
+              <div className="mt-3">
                 <VmTable vms={g.vms} />
-              </CardContent>
+              </div>
             </Card>
           ))}
         </div>
       ) : (
-        <Card>
-          <CardContent>
-            <OwnVmList vms={vms ?? []} reload={reloadOwn} />
-          </CardContent>
-        </Card>
+        <OwnVmList vms={vms!} reload={reloadOwn} />
       )}
     </div>
   );

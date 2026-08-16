@@ -3648,6 +3648,17 @@ export async function getVmIps(
     }
     return { ip: v4 ?? v6, tailscaleIp: ts };
   } catch {
+    try {
+      const configRes = await c.get<{ data?: Record<string, string> }>(`/nodes/${node}/qemu/${vmid}/config`, { timeout: 1500, _noRetry: true } as any);
+      const cfg = configRes.data?.data || {};
+      const ipcfg = cfg.ipconfig0 || cfg.ipconfig1 || '';
+      const match = ipcfg.match(/ip=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/);
+      if (match && match[1] && !match[1].startsWith('127.')) {
+        return { ip: match[1], tailscaleIp: null };
+      }
+    } catch {
+      // ignore
+    }
     return { ip: null, tailscaleIp: null }; // agent absent/not running, or VM stopped
   }
 }

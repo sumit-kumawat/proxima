@@ -145,7 +145,7 @@ export default function AdminMonitorPage() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Monitor"
         description="Live CPU, memory, and network for every VM on the cluster, grouped by owner."

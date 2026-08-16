@@ -58,7 +58,7 @@ export default function TemplatesPage() {
   useEffect(load, [load]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Template Store"
         description="Spin up a ready-made OS build in seconds — or build a custom VM from scratch."
