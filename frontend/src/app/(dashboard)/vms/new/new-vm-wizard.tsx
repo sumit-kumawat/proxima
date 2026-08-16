@@ -4,7 +4,22 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeft, Loader2, Plus, Rocket, HardDrive, KeyRound, Server, Container, ArchiveRestore } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Loader2,
+  Plus,
+  Rocket,
+  HardDrive,
+  KeyRound,
+  Server,
+  Container,
+  ArchiveRestore,
+  CheckCircle2,
+  Cpu,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import type { MeResponse, ProxmoxIso, LxcTemplate, Template, VirtualMachine, SshKey } from "@/lib/types";
@@ -15,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/form-field";
 import { TemplateIcon } from "@/components/template-icon";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -66,45 +82,36 @@ export default function NewVmWizard() {
   const searchParams = useSearchParams();
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
 
-  const [quota, setQuota] = useState<MeResponse["user"]["quota"] | null>(null);
-  const [isos, setIsos] = useState<ProxmoxIso[]>([]);
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [lxcTemplates, setLxcTemplates] = useState<LxcTemplate[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  // 4-Step Wizard Step Control
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
 
-  // `source` is CUSTOM (install from ISO), CONTAINER (LXC from a template), or a
-  // QEMU template id (clone + autoscale).
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [userMe, setUserMe] = useState<MeResponse | null>(null);
+  const [isos, setIsos] = useState<ProxmoxIso[]>([]);
+  const [lxcTemplates, setLxcTemplates] = useState<LxcTemplate[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [savedKeys, setSavedKeys] = useState<SshKey[]>([]);
+  const [availableFeatures, setAvailableFeatures] = useState<{ id: string; label: string; hint: string }[]>([]);
+  const [cloudBase, setCloudBase] = useState<{ id: string; label: string }[]>([]);
+
   const [source, setSource] = useState<string>(CUSTOM);
   const [name, setName] = useState("");
   const [cpu, setCpu] = useState(1);
   const [ramGb, setRamGb] = useState(2);
   const [storageGb, setStorageGb] = useState(CUSTOM_DISK_DEFAULT);
-  const [os, setOs] = useState("");
-  // LXC container deploys only:
+  const [iso, setIso] = useState("");
   const [lxcTemplate, setLxcTemplate] = useState("");
-  // Cloud-init template deploys only:
-  const [sshKey, setSshKey] = useState("");
-  const [savedKeys, setSavedKeys] = useState<SshKey[]>([]);
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [cloudFeatures, setCloudFeatures] = useState<{ id: string; label: string; hint: string }[]>([]);
-  const [cloudNodes, setCloudNodes] = useState<Record<string, string[]>>({}); // node → present snippet files
-  const [cloudBase, setCloudBase] = useState<{ id: string; label: string }[]>([]); // always-on base
-  // On-demand snippet writing: Proxima writes the combo at deploy, so every offered
-  // feature is deployable on any node — the per-node "is the snippet placed?" gate
-  // only applies to the manual fallback.
-  const [cloudOnDemand, setCloudOnDemand] = useState(false);
+  const [sshKey, setSshKey] = useState("");
+  const [username, setUsername] = useState("debian");
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
-  // Restore-from-upload only:
   const [restoreEnabled, setRestoreEnabled] = useState(false);
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
-  // Admin-only deploy options: deploy INTO a tenant's account (optionally without
-  // counting toward their quota) and/or pin the target node. "self"/"auto" =
-  // the normal behavior every tenant gets.
+
   const SELF = "self";
   const AUTO_NODE = "auto";
   const [adminUsers, setAdminUsers] = useState<{ id: string; email: string; displayName: string }[]>([]);
@@ -116,7 +123,6 @@ export default function NewVmWizard() {
   const meId = useAuthStore((s) => s.user?.id);
   useEffect(() => {
     if (!isAdmin) return;
-    // Both are conveniences — never block the wizard if they fail.
     api
       .get<{ id: string; email: string; displayName: string }[]>("/admin/all-vms")
       .then((r) => setAdminUsers(r.data.filter((u) => u.id !== meId)))
@@ -132,221 +138,256 @@ export default function NewVmWizard() {
       api.get<MeResponse>("/auth/me"),
       api.get<ProxmoxIso[]>("/proxmox/isos"),
       api.get<Template[]>("/templates"),
-      // Cloud-init "extras" (Docker/Tailscale) availability — never block the wizard.
       api
         .get<{
           features: { id: string; label: string; hint: string }[];
           nodes: Record<string, string[]>;
           base?: { id: string; label: string }[];
-          onDemand?: boolean;
-        }>("/templates/cloud-init-status")
-        .catch(() => ({ data: { features: [], nodes: {}, base: [], onDemand: false } })),
-      // Saved SSH keys — offered as quick-pick for cloud-init deploys. Never block.
-      api.get<SshKey[]>("/ssh-keys").catch(() => ({ data: [] as SshKey[] })),
-      // LXC OS templates (vztmpl) available on the cluster. Never block the wizard.
-      api.get<LxcTemplate[]>("/vms/lxc-templates").catch(() => ({ data: [] as LxcTemplate[] })),
-      // Whether restore-from-upload is available (backup share mounted rw). Never block.
-      api.get<{ enabled: boolean }>("/vms/restore-capability").catch(() => ({ data: { enabled: false } })),
+        }>("/templates/cloud-init-extras")
+        .then((r) => r.data)
+        .catch(() => ({ features: [], nodes: {}, base: [] })),
+      api
+        .get<LxcTemplate[]>("/proxmox/lxc-templates")
+        .then((r) => r.data)
+        .catch(() => []),
+      api
+        .get<SshKey[]>("/security/ssh-keys")
+        .then((r) => r.data)
+        .catch(() => []),
+      api
+        .get<{ enabled: boolean }>("/vms/restore-upload/status")
+        .then((r) => r.data.enabled)
+        .catch(() => false),
     ])
-      .then(([meRes, isosRes, tplRes, extrasRes, keysRes, lxcRes, restoreRes]) => {
-        setQuota(meRes.data.user.quota);
-        setIsos(isosRes.data);
-        setTemplates(tplRes.data);
-        setCloudFeatures(extrasRes.data.features ?? []);
-        setCloudNodes(extrasRes.data.nodes ?? {});
-        setCloudBase(extrasRes.data.base ?? []);
-        setCloudOnDemand(extrasRes.data.onDemand === true);
-        setSavedKeys(keysRes.data ?? []);
-        setLxcTemplates(lxcRes.data ?? []);
-        setRestoreEnabled(restoreRes.data.enabled === true);
+      .then(([meRes, isoRes, tplRes, extrasRes, lxcRes, sshRes, restoreOk]) => {
+        setUserMe(meRes.data);
+        setIsos(isoRes.data);
+        setLxcTemplates(lxcRes);
+        const pub = tplRes.data.filter((t) => t.published);
+        setTemplates(pub);
+        setSavedKeys(sshRes);
+        setRestoreEnabled(restoreOk);
+        setAvailableFeatures(extrasRes.features ?? []);
+        setCloudBase(extrasRes.base ?? []);
 
-        // Deep-link preselect: /vms/new?template=<id> (e.g. the store's Deploy button).
-        const wanted = searchParams.get("template");
-        const preselected = wanted ? tplRes.data.find((t) => t.id === wanted) : undefined;
-        if (preselected) {
-          setSource(preselected.id);
-          setStorageGb(Math.max(preselected.diskGb, 1));
-          if (preselected.cloudInit) setUsername(cloudUserForOs(preselected.os));
+        if (sshRes.length > 0 && sshRes[0]?.publicKey) {
+          setSshKey(sshRes[0].publicKey);
         }
+
+        const pre = searchParams.get("template");
+        if (pre && pub.some((t) => t.id === pre)) {
+          applySourceSelection(pre, pub, isoRes.data, lxcRes);
+        } else if (pub.length > 0) {
+          applySourceSelection(pub[0]!.id, pub, isoRes.data, lxcRes);
+        } else {
+          applySourceSelection(CUSTOM, pub, isoRes.data, lxcRes);
+        }
+
+        setLoading(false);
       })
-      .catch((err) => setLoadError(apiError(err)))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        setLoadError(apiError(err));
+        setLoading(false);
+      });
   }, [searchParams]);
 
+  function applySourceSelection(
+    src: string,
+    tplList = templates,
+    isoList = isos,
+    lxcList = lxcTemplates,
+  ) {
+    setSource(src);
+    setErrors({});
+    const tpl = tplList.find((t) => t.id === src);
+    if (tpl) {
+      const min = tpl.diskGb ?? 10;
+      setStorageGb((s) => Math.max(s, min));
+      setUsername(cloudUserForOs(tpl.os));
+    } else if (src === CONTAINER) {
+      setStorageGb(CONTAINER_DISK_DEFAULT);
+      if (lxcList.length > 0 && !lxcTemplate) {
+        setLxcTemplate(lxcList[0]!.volid);
+      }
+    } else if (src === CUSTOM) {
+      setStorageGb(CUSTOM_DISK_DEFAULT);
+      if (isoList.length > 0 && !iso) {
+        setIso(isoList[0]!.volid);
+      }
+    }
+  }
+
+  function onSourceChange(src: string) {
+    applySourceSelection(src);
+  }
+
+  const isCustom = source === CUSTOM;
   const isContainer = source === CONTAINER;
   const isRestore = source === RESTORE;
-  const template =
-    source === CUSTOM || isContainer || isRestore ? null : templates.find((t) => t.id === source) ?? null;
-  const isCustom = source === CUSTOM;
-  const isCloud = !!template?.cloudInit;
-  const nodeSnippets = isCloud && template ? cloudNodes[template.proxmoxNode] ?? [] : [];
-  // On-demand: every offered feature is deployable (Proxima writes the combo at
-  // deploy). Manual fallback: only features whose snippet is placed on this node.
-  const availableFeatures = !isCloud
-    ? []
-    : cloudOnDemand
-      ? cloudFeatures
-      : cloudFeatures.filter((f) => nodeSnippets.includes(cloudSnippetFile([f.id])));
-  // A combo deploy needs the combined snippet present too — but only in manual mode;
-  // on-demand writes whatever combo is selected.
-  const bundleReady =
-    cloudOnDemand || selectedFeatures.length === 0 || nodeSnippets.includes(cloudSnippetFile(selectedFeatures));
-  const minDisk = template?.diskGb ?? 1;
+  const template = templates.find((t) => t.id === source);
+  const isCloud = Boolean(template?.cloudInit);
 
-  // Which preset (if any) the current cpu/ram/disk match, so its chip highlights.
-  const activePreset = SIZE_PRESETS.find(
-    (p) => p.cpu === cpu && p.ramGb === ramGb && storageGb === Math.max(p.diskGb, minDisk),
-  )?.key;
+  const minDisk = template ? template.diskGb : isContainer ? CONTAINER_DISK_DEFAULT : 10;
+  const maxCpuAllowed = userMe?.user.quota.cpu.max ?? 4;
+  const maxRamGbAllowed = Math.floor((userMe?.user.quota.ram.max ?? 8192) / 1024);
+  const maxStorageGbAllowed = userMe?.user.quota.storage.max ?? 100;
+
+  const effectiveQuotaUser =
+    isAdmin && forUserId !== SELF
+      ? adminUsers.find((u) => u.id === forUserId)
+      : null;
+
+  const cpuLeft = userMe?.user.quota
+    ? userMe.user.quota.cpu.max - userMe.user.quota.cpu.used
+    : 999;
+  const ramLeftMb = userMe?.user.quota
+    ? userMe.user.quota.ram.max - userMe.user.quota.ram.used
+    : 999999;
+  const storageLeft = userMe?.user.quota
+    ? userMe.user.quota.storage.max - userMe.user.quota.storage.used
+    : 9999;
+
+  function presetFits(p: (typeof SIZE_PRESETS)[number]) {
+    if (isAdmin && (forUserId === SELF || !countQuota)) return true;
+    const diskNeeded = Math.max(p.diskGb, minDisk);
+    return (
+      p.cpu <= cpuLeft &&
+      p.cpu <= maxCpuAllowed &&
+      p.ramGb * 1024 <= ramLeftMb &&
+      p.ramGb <= maxRamGbAllowed &&
+      diskNeeded <= storageLeft &&
+      diskNeeded <= maxStorageGbAllowed
+    );
+  }
 
   function applyPreset(p: (typeof SIZE_PRESETS)[number]) {
     setCpu(p.cpu);
     setRamGb(p.ramGb);
     setStorageGb(Math.max(p.diskGb, minDisk));
-    setErrors({});
   }
 
-  const cpuLeft = quota ? quota.cpu.max - quota.cpu.used : 0;
-  const ramLeftMb = quota ? quota.ram.max - quota.ram.used : 0;
-  const storageLeft = quota ? quota.storage.max - quota.storage.used : 0;
+  const activePreset = SIZE_PRESETS.find(
+    (p) => p.cpu === cpu && p.ramGb === ramGb && Math.max(p.diskGb, minDisk) === storageGb,
+  )?.key;
 
-  // A preset is selectable only if the user's *remaining* quota can fit it (admins
-  // are bounded by cluster capacity, not quota). Over-quota presets are disabled.
-  const presetFits = (p: (typeof SIZE_PRESETS)[number]) => {
-    if (isAdmin) return true;
-    return (
-      p.cpu <= cpuLeft &&
-      p.ramGb * 1024 <= ramLeftMb &&
-      Math.max(p.diskGb, minDisk) <= storageLeft
-    );
+  const nextStep = () => {
+    const errs: Record<string, string> = {};
+    if (step === 1) {
+      if (!name.trim()) errs.name = "Enter a virtual machine name";
+      if (Object.keys(errs).length) {
+        setErrors(errs);
+        return;
+      }
+      setStep(2);
+    } else if (step === 2) {
+      if (isCustom && !iso) errs.iso = "Select an ISO image";
+      if (isContainer && !lxcTemplate) errs.lxcTemplate = "Select a container template";
+      if (isRestore && !backupFile) errs.backupFile = "Select a backup file";
+      if (Object.keys(errs).length) {
+        setErrors(errs);
+        return;
+      }
+      setStep(3);
+    } else if (step === 3) {
+      if (!isAdmin || (forUserId !== SELF && countQuota)) {
+        if (cpu > cpuLeft) errs.cpu = `Exceeds remaining CPU quota (${cpuLeft} vCPU)`;
+        if (ramGb * 1024 > ramLeftMb) errs.ram = `Exceeds remaining RAM quota (${formatRam(ramLeftMb)})`;
+        if (storageGb > storageLeft) errs.storage = `Exceeds remaining storage quota (${storageLeft} GB)`;
+      }
+      if (Object.keys(errs).length) {
+        setErrors(errs);
+        return;
+      }
+      setStep(4);
+    }
   };
 
-  function onSourceChange(v: string) {
-    setSource(v);
-    setErrors({});
-    setSelectedFeatures([]);
-    if (v === CUSTOM) {
-      setStorageGb(CUSTOM_DISK_DEFAULT);
-    } else if (v === CONTAINER || v === RESTORE) {
-      setStorageGb(CONTAINER_DISK_DEFAULT);
-    } else {
-      const t = templates.find((x) => x.id === v);
-      setStorageGb(t ? Math.max(t.diskGb, 1) : CUSTOM_DISK_DEFAULT);
-      if (t?.cloudInit) setUsername((u) => u || cloudUserForOs(t.os));
-    }
-  }
+  const prevStep = () => {
+    if (step > 1) setStep((s) => (s - 1) as 1 | 2 | 3 | 4);
+  };
 
-  function validate(): boolean {
-    const e: Record<string, string> = {};
-    if (!/^[a-zA-Z0-9-]+$/.test(name)) e.name = "Use letters, numbers and hyphens only";
-    if (isRestore) {
-      // Sizing comes from inside the backup (quota is enforced server-side from
-      // the archive's embedded config), so only the name + file matter here.
-      if (!backupFile) e.backupFile = "Choose your downloaded MateState backup file";
-      else if (!VZDUMP_FILE_RE.test(backupFile.name))
-        e.backupFile = "That doesn't look like a MateState backup (expected vzdump-…-….vma.zst / .tar.zst)";
-      setErrors(e);
-      return Object.keys(e).length === 0;
-    }
-    if (cpu < 1) e.cpu = "At least 1 vCPU";
-    else if (!isAdmin && cpu > cpuLeft) e.cpu = `Exceeds your remaining ${cpuLeft} vCPU`;
-    if (!isAdmin && ramGb * 1024 > ramLeftMb) e.ram = `Exceeds your remaining ${formatRam(ramLeftMb)}`;
-    if (storageGb < minDisk)
-      e.storage = template ? `Template needs at least ${minDisk} GB` : "At least 1 GB";
-    else if (!isAdmin && storageGb > storageLeft) e.storage = `Exceeds your remaining ${storageLeft} GB`;
-    if (isCustom && !os) e.os = "Select an installation ISO";
-    if (isContainer) {
-      if (!lxcTemplate) e.lxcTemplate = "Select a container template";
-      if (!sshKey.trim() && !password) e.sshKey = "Add an SSH public key (or set a root password below)";
-      else if (sshKey.trim() && !/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/.test(sshKey.trim()))
-        e.sshKey = "That doesn't look like an OpenSSH public key";
-      if (password && password.length < 5) e.password = "Use at least 5 characters";
-    }
-    if (isCloud) {
-      if (!sshKey.trim() && !password) e.sshKey = "Add an SSH public key (or set a password below)";
-      else if (sshKey.trim() && !/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/.test(sshKey.trim()))
-        e.sshKey = "That doesn't look like an OpenSSH public key";
-      if (username && !/^[a-z_][a-z0-9_-]{0,31}$/.test(username)) e.username = "Lowercase letters, digits, _ and -";
-      if (selectedFeatures.length > 0 && !bundleReady)
-        e.features = "This combination isn't set up on the template's node — ask an admin to add its snippet.";
-    }
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  }
-
-  /** The admin-only create options actually selected (empty for tenants/defaults). */
-  function adminOpts(allowNode: boolean): { forUserId?: string; quotaExempt?: boolean; node?: string } {
-    if (!isAdmin) return {};
-    const forTenant = forUserId !== SELF;
-    return {
-      ...(forTenant ? { forUserId } : {}),
-      // The checkbox only matters when deploying for a tenant (admins bypass quota).
-      ...(forTenant && !countQuota ? { quotaExempt: true } : {}),
-      ...(allowNode && nodeChoice !== AUTO_NODE ? { node: nodeChoice } : {}),
-    };
-  }
-
-  async function onSubmit(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (!validate()) return;
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setSubmitting(true);
     try {
       if (isRestore) {
-        const form = new FormData();
-        form.append("name", name);
-        form.append("file", backupFile!);
-        const res = await api.post<{ vm: VirtualMachine }>("/vms/restore-upload", form, {
-          onUploadProgress: (p) => {
-            if (p.total) setUploadPct(Math.round((p.loaded / p.total) * 100));
+        if (!backupFile) {
+          setErrors({ backupFile: "Select a backup file" });
+          setSubmitting(false);
+          return;
+        }
+        const formData = new FormData();
+        formData.append("backup", backupFile);
+        if (name.trim()) formData.append("name", name.trim());
+        const targetQuery = isAdmin && forUserId !== SELF ? `?forUserId=${encodeURIComponent(forUserId)}` : "";
+        const res = await api.post<{ ok: boolean; vm: VirtualMachine }>(
+          `/vms/restore-upload${targetQuery}`,
+          formData,
+          {
+            headers: { "Content-Type": "multipart/form-data" },
+            onUploadProgress: (ev) => {
+              if (ev.total) setUploadPct(Math.round((ev.loaded * 100) / ev.total));
+            },
           },
-        });
-        setUploadPct(null);
-        toast.success(`"${name}" is being restored from your backup.`);
+        );
+        toast.success(`"${res.data.vm.name}" restored successfully.`);
         router.push(`/vms/${res.data.vm.id}`);
       } else if (isCustom) {
-        const res = await api.post<{ vm: VirtualMachine }>("/vms", {
-          name,
+        const payload: Record<string, unknown> = {
+          name: name.trim(),
           cpu,
-          ram: ramGb * 1024,
-          storage: storageGb,
-          os,
-          // Tenants never send a node — the backend auto-schedules. Admins may
-          // pin one (or deploy for a tenant) via the admin options below.
-          ...adminOpts(true),
-        });
-        toast.success(`VM "${name}" is being created.`);
+          ramMb: ramGb * 1024,
+          storageGb,
+          iso,
+        };
+        if (isAdmin) {
+          if (forUserId !== SELF) {
+            payload.forUserId = forUserId;
+            payload.countQuota = countQuota;
+          }
+          if (nodeChoice !== AUTO_NODE) payload.node = nodeChoice;
+        }
+        const res = await api.post<{ vm: VirtualMachine }>("/vms", payload);
+        toast.success(`Virtual machine "${res.data.vm.name}" created.`);
         router.push(`/vms/${res.data.vm.id}`);
       } else if (isContainer) {
-        const res = await api.post<{ vm: VirtualMachine }>("/vms/containers", {
-          name,
+        const payload: Record<string, unknown> = {
+          name: name.trim(),
           cpu,
-          ram: ramGb * 1024,
-          storage: storageGb,
-          template: lxcTemplate,
+          ramMb: ramGb * 1024,
+          storageGb,
+          lxcTemplate,
           sshKey: sshKey.trim() || undefined,
           password: password || undefined,
-          ...adminOpts(true),
-        });
-        toast.success(`Container "${name}" is being created.`);
+        };
+        if (isAdmin) {
+          if (forUserId !== SELF) {
+            payload.forUserId = forUserId;
+            payload.countQuota = countQuota;
+          }
+          if (nodeChoice !== AUTO_NODE) payload.node = nodeChoice;
+        }
+        const res = await api.post<{ vm: VirtualMachine }>("/vms/lxc", payload);
+        toast.success(`Container "${res.data.vm.name}" created.`);
         router.push(`/vms/${res.data.vm.id}`);
       } else {
-        const res = await api.post<{ vm: VirtualMachine }>("/templates/deploy", {
+        const payload: Record<string, unknown> = {
           templateId: source,
-          name,
+          name: name.trim(),
           cpu,
-          ram: ramGb * 1024,
-          storage: storageGb,
-          ...(isCloud
-            ? {
-                sshKey: sshKey.trim() || undefined,
-                username: username || undefined,
-                password: password || undefined,
-                features: selectedFeatures.length ? selectedFeatures : undefined,
-              }
-            : {}),
-          // Template clones stay on the template's node — no node option here.
-          ...adminOpts(false),
-        });
-        toast.success(`Deploying "${name}" from ${template?.name}.`);
+          ramMb: ramGb * 1024,
+          storageGb,
+          sshKey: sshKey.trim() || undefined,
+          password: password || undefined,
+          username: username.trim() || undefined,
+          cloudInitFeatures: selectedFeatures.length ? selectedFeatures : undefined,
+        };
+        if (isAdmin && forUserId !== SELF) {
+          payload.forUserId = forUserId;
+          payload.countQuota = countQuota;
+        }
+        const res = await api.post<{ vm: VirtualMachine }>("/templates/deploy", payload);
+        toast.success(`Virtual machine "${res.data.vm.name}" deployed.`);
         router.push(`/vms/${res.data.vm.id}`);
       }
     } catch (err) {
@@ -359,424 +400,179 @@ export default function NewVmWizard() {
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
-        title="Create a virtual machine"
-        description="Build from scratch with an ISO, or clone a ready-made template — autoscaled to the size you pick."
+        title="Create a Virtual Machine"
+        description="Build from scratch with an ISO, or clone a ready-made template in a 4-step wizard."
       >
         <Button variant="ghost" render={<Link href="/vms" />}>
-          <ArrowLeft />
-          Back
+          <ArrowLeft /> Back to VMs
         </Button>
       </PageHeader>
 
-      <Card>
+      <Card className="shadow-xs">
         {loading ? (
           <CardContent className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Loading options…
+            <Loader2 className="size-4 animate-spin" /> Loading configuration wizard…
           </CardContent>
         ) : loadError ? (
           <CardContent className="py-8 text-center text-sm text-destructive">{loadError}</CardContent>
         ) : (
-          <>
-            <CardHeader>
-              <CardTitle>Configuration</CardTitle>
-              <CardDescription>
-                {isAdmin
-                  ? "Creating as admin — limited only by cluster capacity."
-                  : `Remaining quota: ${cpuLeft} vCPU · ${formatRam(ramLeftMb)} · ${storageLeft} GB disk`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={onSubmit} className="grid gap-4">
-                <FormField
-                  label="Source"
-                  hint={
-                    isCustom
-                      ? "Install a fresh OS from an ISO image."
-                      : isContainer
-                        ? "A lightweight Linux container (LXC) from an OS template — boots in seconds."
-                        : isRestore
-                          ? "Rebuild a machine from a MateState backup you downloaded — perfect for migrating between clusters or Proxima instances."
-                          : template
-                            ? `${template.description || template.os || "Linux template"} · ${template.diskGb} GB base`
-                            : undefined
-                  }
+          <CardContent className="p-6">
+            {/* 4-Step Wizard Header Indicator */}
+            <div className="mb-8 border-b pb-6">
+              <div className="grid grid-cols-4 gap-2 text-xs font-medium">
+                <div
+                  onClick={() => setStep(1)}
+                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
+                    step === 1 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
                 >
-                  <Select value={source} onValueChange={(v) => onSourceChange(v as string)}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={CUSTOM}>
-                        <span className="flex items-center gap-2">
-                          <Plus className="size-3.5" /> Custom VM (install from ISO)
-                        </span>
-                      </SelectItem>
-                      <SelectItem value={CONTAINER}>
-                        <span className="flex items-center gap-2">
-                          <Container className="size-3.5" /> Container (LXC)
-                        </span>
-                      </SelectItem>
-                      {templates.length > 0 && (
-                        <SelectGroup>
-                          <SelectSeparator />
-                          <SelectLabel>Template Store</SelectLabel>
-                          {templates.map((t) => (
-                            <SelectItem key={t.id} value={t.id}>
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 1 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>1</span>
+                  <span className="truncate">General & Mode</span>
+                </div>
+
+                <div
+                  onClick={() => name.trim() && setStep(2)}
+                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
+                    step === 2 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 2 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>2</span>
+                  <span className="truncate">OS Image & Node</span>
+                </div>
+
+                <div
+                  onClick={() => name.trim() && setStep(3)}
+                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
+                    step === 3 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 3 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>3</span>
+                  <span className="truncate">Hardware & Sizing</span>
+                </div>
+
+                <div
+                  onClick={() => name.trim() && setStep(4)}
+                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
+                    step === 4 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 4 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>4</span>
+                  <span className="truncate">Access & Review</span>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={onSubmit} className="space-y-6">
+              {/* STEP 1: General & Mode */}
+              {step === 1 && (
+                <div className="space-y-4">
+                  <div className="border-b pb-2">
+                    <h3 className="text-base font-semibold text-foreground">Step 1: General & Mode</h3>
+                    <p className="text-xs text-muted-foreground">Specify virtual machine identity and creation mode.</p>
+                  </div>
+
+                  <FormField label="Virtual Machine Name" htmlFor="name" error={errors.name} hint="e.g. web-server-01">
+                    <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="web-server-01" autoFocus />
+                  </FormField>
+
+                  <FormField label="Guest Creation Mode">
+                    <Select value={source} onValueChange={(v) => onSourceChange(v as string)}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={CUSTOM}>
+                          <span className="flex items-center gap-2">
+                            <Plus className="size-3.5" /> Custom VM (install from ISO)
+                          </span>
+                        </SelectItem>
+                        <SelectItem value={CONTAINER}>
+                          <span className="flex items-center gap-2">
+                            <Container className="size-3.5" /> Container (LXC)
+                          </span>
+                        </SelectItem>
+                        {templates.length > 0 && (
+                          <SelectGroup>
+                            <SelectSeparator />
+                            <SelectLabel>Template Store</SelectLabel>
+                            {templates.map((t) => (
+                              <SelectItem key={t.id} value={t.id}>
+                                <span className="flex items-center gap-2">
+                                  <TemplateIcon os={t.os} name={t.name} icon={t.icon} className="size-3.5" /> {t.name}
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        )}
+                        {restoreEnabled && (
+                          <SelectGroup>
+                            <SelectSeparator />
+                            <SelectItem value={RESTORE}>
                               <span className="flex items-center gap-2">
-                                <TemplateIcon os={t.os} name={t.name} icon={t.icon} className="size-3.5" /> {t.name}
-                                <span className="text-muted-foreground">· {t.diskGb} GB</span>
+                                <ArchiveRestore className="size-3.5" /> Restore from old build
                               </span>
                             </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      )}
-                      {restoreEnabled && (
-                        <SelectGroup>
-                          <SelectSeparator />
-                          <SelectItem value={RESTORE}>
-                            <span className="flex items-center gap-2">
-                              <ArchiveRestore className="size-3.5" /> Restore from old build
-                              <span className="text-muted-foreground">· upload your MateState backup</span>
-                            </span>
-                          </SelectItem>
-                        </SelectGroup>
-                      )}
-                    </SelectContent>
-                  </Select>
-                </FormField>
+                          </SelectGroup>
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
 
-                {template?.notes && (
-                  <div className="rounded-md bg-muted/60 p-3 text-xs">
-                    <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground">
-                      <KeyRound className="size-3.5" /> Login &amp; notes for {template.name}
-                    </div>
-                    <p className="whitespace-pre-wrap break-words text-muted-foreground">{template.notes}</p>
-                  </div>
-                )}
-
-                {/* Admin-only deploy options — tenants never see these (and the API
-                    rejects them from non-admins). Restore-uploads don't support them. */}
-                {isAdmin && !isRestore && (
-                  <div className="grid gap-3 rounded-md border bg-muted/40 p-3">
-                    <div className="flex items-center gap-1.5 text-sm font-medium">
-                      <Rocket className="size-3.5" /> Admin options
-                    </div>
-                    <FormField
-                      label="Deploy for"
-                      hint={forUserId === SELF ? "Your own VM (admin account)." : "The VM lands in this tenant's account — they own it."}
-                    >
-                      <Select value={forUserId} onValueChange={(v) => setForUserId(v as string)}>
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={SELF}>Myself (admin)</SelectItem>
-                          {adminUsers.map((u) => (
-                            <SelectItem key={u.id} value={u.id}>
-                              {u.displayName} <span className="text-muted-foreground">· {u.email}</span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </FormField>
-                    {forUserId !== SELF && (
-                      <label className="flex cursor-pointer items-start gap-2.5 rounded-md border bg-background p-3">
-                        <input
-                          type="checkbox"
-                          checked={countQuota}
-                          onChange={(e) => setCountQuota(e.target.checked)}
-                          className="mt-0.5 size-4 accent-primary"
-                        />
-                        <span className="text-sm">
-                          <span className="font-medium">Count against their quota</span>
-                          <span className="block text-xs text-muted-foreground">
-                            Unchecked = a grant on top of their quota: this VM never consumes it, even
-                            when resized.
-                          </span>
-                        </span>
-                      </label>
-                    )}
-                    {(isCustom || isContainer) ? (
-                      <FormField
-                        label="Node"
-                        hint="Auto-select places it on the best-capacity eligible node."
-                      >
-                        <Select value={nodeChoice} onValueChange={(v) => setNodeChoice(v as string)}>
+                  {isAdmin && (
+                    <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-xs">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <Rocket className="size-3.5 text-primary" /> Admin options
+                      </div>
+                      <FormField label="Deploy for">
+                        <Select value={forUserId} onValueChange={(v) => setForUserId(v as string)}>
                           <SelectTrigger className="w-full">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value={AUTO_NODE}>Auto-select (recommended)</SelectItem>
-                            {adminNodes.map((n) => (
-                              <SelectItem key={n} value={n}>
-                                <span className="flex items-center gap-2">
-                                  <Server className="size-3.5" /> {n}
-                                </span>
+                            <SelectItem value={SELF}>Myself (admin)</SelectItem>
+                            {adminUsers.map((u) => (
+                              <SelectItem key={u.id} value={u.id}>
+                                {u.displayName} ({u.email})
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </FormField>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Template deploys stay on the template&apos;s node (linked clone) — no node
-                        choice here.
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                <FormField label="Name" htmlFor="name" error={errors.name} hint="e.g. web-server-01">
-                  <Input id="name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-                </FormField>
-
-                {!isRestore && (
-                <>
-                <FormField label="Size" hint="A quick start — fine-tune any field below.">
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    {SIZE_PRESETS.map((p) => {
-                      const fits = presetFits(p);
-                      return (
-                        <button
-                          key={p.key}
-                          type="button"
-                          onClick={() => applyPreset(p)}
-                          disabled={!fits}
-                          aria-pressed={activePreset === p.key}
-                          title={fits ? undefined : "Exceeds your remaining quota"}
-                          className={
-                            "rounded-lg border p-2.5 text-left transition-colors " +
-                            (!fits
-                              ? "cursor-not-allowed opacity-40"
-                              : activePreset === p.key
-                                ? "border-primary bg-primary/10"
-                                : "hover:border-primary/50 hover:bg-muted")
-                          }
-                        >
-                          <div className="text-sm font-medium">{p.label}</div>
-                          <div className="mt-0.5 text-xs text-muted-foreground">
-                            {p.cpu} vCPU · {p.ramGb} GB
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {Math.max(p.diskGb, minDisk)} GB disk
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </FormField>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <FormField label="vCPU cores" htmlFor="cpu" error={errors.cpu}>
-                    <Input
-                      id="cpu"
-                      type="number"
-                      min={1}
-                      value={cpu}
-                      onChange={(e) => setCpu(Number(e.target.value))}
-                    />
-                  </FormField>
-
-                  <FormField label="Memory" error={errors.ram}>
-                    <Select value={String(ramGb)} onValueChange={(v) => setRamGb(Number(v))}>
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RAM_OPTIONS.map((gb) => (
-                          <SelectItem key={gb} value={String(gb)}>
-                            {gb} GB
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FormField>
-                </div>
-
-                <FormField
-                  label="Disk size (GB)"
-                  htmlFor="storage"
-                  error={errors.storage}
-                  hint={
-                    template
-                      ? `Minimum ${minDisk} GB (template base) — can grow, not shrink`
-                      : undefined
-                  }
-                >
-                  <Input
-                    id="storage"
-                    type="number"
-                    min={minDisk}
-                    value={storageGb}
-                    onChange={(e) => setStorageGb(Number(e.target.value))}
-                  />
-                </FormField>
-                </>
-                )}
-
-                {isRestore && (
-                  <>
-                    <FormField
-                      label="MateState backup file"
-                      htmlFor="backup-file"
-                      error={errors.backupFile}
-                      hint="The vzdump archive from your MateState download email (.vma.zst for VMs, .tar.zst for containers)."
-                    >
-                      <Input
-                        id="backup-file"
-                        type="file"
-                        accept=".zst,.gz,.lzo,.vma,.tar"
-                        onChange={(e) => {
-                          setBackupFile(e.target.files?.[0] ?? null);
-                          setErrors({});
-                        }}
-                        className="cursor-pointer file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1 file:text-xs file:font-medium"
-                      />
-                    </FormField>
-
-                    {uploadPct !== null && (
-                      <div>
-                        <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                          <span>Uploading backup…</span>
-                          <span>{uploadPct}%</span>
-                        </div>
-                        <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                          <div
-                            className="h-full rounded-full bg-primary transition-all"
-                            style={{ width: `${uploadPct}%` }}
-                          />
-                        </div>
-                        {uploadPct === 100 && (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Upload complete — restoring on the cluster (this can take a few minutes)…
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Server className="size-3.5" />
-                      The machine keeps the CPU, memory and disk sizes stored inside the backup (they
-                      count against your quota), gets a fresh network identity, and is placed on the
-                      best node automatically.
-                    </p>
-                  </>
-                )}
-
-                {isCloud && (
-                  <>
-                    <FormField
-                      label="SSH public key"
-                      htmlFor="sshkey"
-                      error={errors.sshKey}
-                      hint="Injected on first boot so you can SSH in right away — paste the output of `cat ~/.ssh/id_ed25519.pub`."
-                    >
-                      {savedKeys.length > 0 && (
-                        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                          <span className="text-xs text-muted-foreground">Use a saved key:</span>
-                          {savedKeys.map((k) => (
-                            <button
-                              key={k.id}
-                              type="button"
-                              onClick={() => setSshKey(k.publicKey)}
-                              className={
-                                "rounded-full border px-2.5 py-0.5 text-xs transition-colors " +
-                                (sshKey === k.publicKey
-                                  ? "border-primary bg-primary/10 text-primary"
-                                  : "hover:bg-muted")
-                              }
-                            >
-                              {k.name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <textarea
-                        id="sshkey"
-                        value={sshKey}
-                        onChange={(e) => setSshKey(e.target.value)}
-                        placeholder="ssh-ed25519 AAAA… you@laptop"
-                        className="h-20 w-full resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
-                      />
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Save keys for reuse in{" "}
-                        <Link href="/security" className="text-primary underline-offset-4 hover:underline">
-                          Security → SSH keys
-                        </Link>
-                        .
-                      </p>
-                    </FormField>
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <FormField label="Username" htmlFor="ciuser" error={errors.username} hint="The login user to create.">
-                        <Input
-                          id="ciuser"
-                          value={username}
-                          onChange={(e) => setUsername(e.target.value)}
-                          placeholder="debian"
-                        />
-                      </FormField>
-                      <FormField label="Password (optional)" htmlFor="cipassword" hint="SSH key is recommended.">
-                        <Input
-                          id="cipassword"
-                          type="password"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                        />
-                      </FormField>
                     </div>
-                    {availableFeatures.length > 0 && (
-                      <div className="grid gap-2">
-                        {availableFeatures.map((f) => {
-                          const checked = selectedFeatures.includes(f.id);
-                          return (
-                            <label
-                              key={f.id}
-                              className="flex cursor-pointer items-start gap-2.5 rounded-md border bg-muted/40 p-3"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(e) =>
-                                  setSelectedFeatures((s) =>
-                                    e.target.checked ? [...s, f.id] : s.filter((x) => x !== f.id),
-                                  )
-                                }
-                                className="mt-0.5 size-4 accent-primary"
-                              />
-                              <span className="text-sm">
-                                <span className="flex items-center gap-1.5 font-medium">
-                                  <Container className="size-3.5" /> {f.label}
-                                </span>
-                                <span className="text-xs text-muted-foreground">{f.hint}</span>
-                              </span>
-                            </label>
-                          );
-                        })}
-                        {errors.features && <p className="text-xs text-destructive">{errors.features}</p>}
-                      </div>
-                    )}
-                    {cloudBase.length > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        Also installed on every VM: {cloudBase.map((b) => b.label).join(", ")}.
-                      </p>
-                    )}
-                  </>
-                )}
+                  )}
+                </div>
+              )}
 
-                {isContainer && (
-                  <>
-                    <FormField label="Container template" error={errors.lxcTemplate}>
-                      <Select
-                        value={lxcTemplate}
-                        onValueChange={(v) => {
-                          setLxcTemplate(v as string);
-                          setErrors({});
-                        }}
-                      >
+              {/* STEP 2: OS Image & Node */}
+              {step === 2 && (
+                <div className="space-y-4">
+                  <div className="border-b pb-2">
+                    <h3 className="text-base font-semibold text-foreground">Step 2: OS Image & Target Node</h3>
+                    <p className="text-xs text-muted-foreground">Select operating system image and Proxmox node target.</p>
+                  </div>
+
+                  {isCustom && (
+                    <FormField label="ISO Image" error={errors.iso}>
+                      <Select value={iso} onValueChange={(v: any) => setIso(String(v))}>
                         <SelectTrigger className="w-full">
-                          <SelectValue
-                            placeholder={lxcTemplates.length ? "Select a template" : "No container templates available"}
-                          />
+                          <SelectValue placeholder="Select ISO..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {isos.map((i) => (
+                            <SelectItem key={i.volid} value={i.volid}>
+                              {i.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FormField>
+                  )}
+
+                  {isContainer && (
+                    <FormField label="Container Template" error={errors.lxcTemplate}>
+                      <Select value={lxcTemplate} onValueChange={(v: any) => setLxcTemplate(String(v))}>
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Select LXC template..." />
                         </SelectTrigger>
                         <SelectContent>
                           {lxcTemplates.map((t) => (
@@ -787,121 +583,172 @@ export default function NewVmWizard() {
                         </SelectContent>
                       </Select>
                     </FormField>
+                  )}
 
-                    <FormField
-                      label="SSH public key"
-                      htmlFor="ct-sshkey"
-                      error={errors.sshKey}
-                      hint="Added to the container's root authorized_keys so you can SSH in — or set a root password below."
-                    >
-                      {savedKeys.length > 0 && (
-                        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                          <span className="text-xs text-muted-foreground">Use a saved key:</span>
-                          {savedKeys.map((k) => (
-                            <button
-                              key={k.id}
-                              type="button"
-                              onClick={() => setSshKey(k.publicKey)}
-                              className={
-                                "rounded-full border px-2.5 py-0.5 text-xs transition-colors " +
-                                (sshKey === k.publicKey
-                                  ? "border-primary bg-primary/10 text-primary"
-                                  : "hover:bg-muted")
-                              }
-                            >
-                              {k.name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <textarea
-                        id="ct-sshkey"
-                        value={sshKey}
-                        onChange={(e) => setSshKey(e.target.value)}
-                        placeholder="ssh-ed25519 AAAA… you@laptop"
-                        className="h-20 w-full resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Root password (optional)"
-                      htmlFor="ct-password"
-                      error={errors.password}
-                      hint="SSH key is recommended. At least 5 characters if set."
-                    >
-                      <Input
-                        id="ct-password"
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                      />
-                    </FormField>
-
-                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Server className="size-3.5" />
-                      Proxima places the container on a node that has this template, with the most free
-                      capacity.
-                    </p>
-                  </>
-                )}
-
-                {isCustom && (
-                  <>
-                    <FormField label="Installation ISO" error={errors.os}>
-                      <Select value={os} onValueChange={(v) => setOs(v as string)}>
+                  {isAdmin && (
+                    <FormField label="Proxmox Node Target" hint="Auto-select places on node with best capacity.">
+                      <Select value={nodeChoice} onValueChange={(v: any) => setNodeChoice(String(v))}>
                         <SelectTrigger className="w-full">
-                          <SelectValue placeholder={isos.length ? "Select an ISO" : "No ISOs available"} />
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {isos.map((iso) => (
-                            <SelectItem key={iso.volid} value={iso.name}>
-                              {iso.name}
+                          <SelectItem value={AUTO_NODE}>Auto-select (recommended)</SelectItem>
+                          {adminNodes.map((n) => (
+                            <SelectItem key={n} value={n}>
+                              <span className="flex items-center gap-2">
+                                <Server className="size-3.5" /> {n}
+                              </span>
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </FormField>
-
-                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Server className="size-3.5" />
-                      Proxima automatically places your VM on a node that has this ISO, with the most
-                      free capacity.
-                    </p>
-                  </>
-                )}
-
-                {!isCustom && !isContainer && !isRestore && (
-                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <HardDrive className="size-3.5" />
-                    Clones stay on the template&apos;s node and storage — fast and space-efficient.
-                  </p>
-                )}
-
-                <Button type="submit" disabled={submitting} className="mt-2">
-                  {submitting ? (
-                    <Loader2 className="animate-spin" />
-                  ) : isCustom ? (
-                    <Plus />
-                  ) : isContainer ? (
-                    <Container />
-                  ) : isRestore ? (
-                    <ArchiveRestore />
-                  ) : (
-                    <Rocket />
                   )}
-                  {isCustom
-                    ? "Create VM"
-                    : isContainer
-                      ? "Create container"
-                      : isRestore
-                        ? uploadPct !== null
-                          ? "Restoring…"
-                          : "Upload & restore"
-                        : "Deploy"}
+                </div>
+              )}
+
+              {/* STEP 3: Hardware & Sizing */}
+              {step === 3 && (
+                <div className="space-y-4">
+                  <div className="border-b pb-2">
+                    <h3 className="text-base font-semibold text-foreground">Step 3: Hardware & Sizing</h3>
+                    <p className="text-xs text-muted-foreground">Pick a sizing preset or customize CPU, RAM, and Disk storage.</p>
+                  </div>
+
+                  <FormField label="Sizing Presets">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {SIZE_PRESETS.map((p) => {
+                        const fits = presetFits(p);
+                        return (
+                          <button
+                            key={p.key}
+                            type="button"
+                            onClick={() => applyPreset(p)}
+                            disabled={!fits}
+                            className={`rounded-lg border p-2.5 text-left transition-colors ${
+                              !fits
+                                ? "cursor-not-allowed opacity-40"
+                                : activePreset === p.key
+                                  ? "border-primary bg-primary/10 font-semibold"
+                                  : "hover:border-primary/50 hover:bg-muted"
+                            }`}
+                          >
+                            <div className="text-sm font-medium">{p.label}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                              {p.cpu} vCPU · {p.ramGb} GB RAM
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {Math.max(p.diskGb, minDisk)} GB Disk
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </FormField>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField label="vCPU Cores" error={errors.cpu}>
+                      <Input type="number" min={1} value={cpu} onChange={(e) => setCpu(Number(e.target.value))} />
+                    </FormField>
+                    <FormField label="Memory (RAM)" error={errors.ram}>
+                      <Select value={String(ramGb)} onValueChange={(v) => setRamGb(Number(v))}>
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {RAM_OPTIONS.map((gb) => (
+                            <SelectItem key={gb} value={String(gb)}>
+                              {gb} GB
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FormField>
+                  </div>
+
+                  <FormField label="Disk Size (GB)" error={errors.storage}>
+                    <Input type="number" min={minDisk} value={storageGb} onChange={(e) => setStorageGb(Number(e.target.value))} />
+                  </FormField>
+                </div>
+              )}
+
+              {/* STEP 4: Credentials & Final Review */}
+              {step === 4 && (
+                <div className="space-y-4">
+                  <div className="border-b pb-2">
+                    <h3 className="text-base font-semibold text-foreground">Step 4: Credentials & Final Review</h3>
+                    <p className="text-xs text-muted-foreground">Configure login access credentials and review VM deployment summary.</p>
+                  </div>
+
+                  {isCloud && (
+                    <div className="space-y-4">
+                      <FormField label="SSH Public Key" hint="Pasted output of cat ~/.ssh/id_ed25519.pub">
+                        <textarea
+                          value={sshKey}
+                          onChange={(e) => setSshKey(e.target.value)}
+                          placeholder="ssh-ed25519 AAAA… you@laptop"
+                          className="h-20 w-full resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
+                        />
+                      </FormField>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <FormField label="Username">
+                          <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="debian" />
+                        </FormField>
+                        <FormField label="Password (optional)">
+                          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                        </FormField>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Summary Card */}
+                  <Card className="bg-muted/40 border border-primary/20">
+                    <CardHeader className="py-3 border-b">
+                      <CardTitle className="text-xs font-semibold flex items-center gap-1.5">
+                        <Sparkles className="size-4 text-primary" /> Deployment Summary
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-3 text-xs font-mono space-y-1.5">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Name:</span>
+                        <span className="font-semibold text-foreground">{name}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Source:</span>
+                        <span className="font-semibold text-foreground uppercase">{source}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Hardware:</span>
+                        <span className="font-semibold text-foreground">{cpu} vCPU · {ramGb} GB RAM · {storageGb} GB Disk</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Node:</span>
+                        <span className="font-semibold text-foreground">{nodeChoice}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {/* Wizard Navigation Footer Buttons */}
+              <div className="flex items-center justify-between border-t pt-4">
+                <Button type="button" variant="outline" onClick={prevStep} disabled={step === 1}>
+                  <ArrowLeft className="size-4" /> Back
                 </Button>
-              </form>
-            </CardContent>
-          </>
+
+                {step < 4 ? (
+                  <Button type="button" onClick={nextStep}>
+                    Next Step <ArrowRight className="size-4" />
+                  </Button>
+                ) : (
+                  <Button type="submit" variant="default" disabled={submitting}>
+                    {submitting ? <Loader2 className="size-4 animate-spin" /> : <Rocket className="size-4" />}
+                    Create Virtual Machine
+                  </Button>
+                )}
+              </div>
+            </form>
+          </CardContent>
         )}
       </Card>
     </div>

@@ -20,6 +20,9 @@ import {
   Pencil,
   Info,
   Sliders,
+  CheckSquare,
+  Square,
+  ShieldCheck,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { formatBytes, formatDate } from "@/lib/format";
@@ -38,7 +41,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
 import {
   Select,
   SelectContent,
@@ -90,16 +92,6 @@ interface VmPolicy {
   user: { email: string; displayName: string };
 }
 
-interface BackupJobSpec {
-  id: string;
-  node: string;
-  storage: string;
-  selectionMode: "all" | "selected" | "exclude";
-  scheduleCron: string;
-  keepCount: number;
-  compression: "zstd" | "gzip" | "none";
-}
-
 export default function AdminBackupsPage() {
   const [backups, setBackups] = useState<MateStateBackup[] | null>(null);
   const [policies, setPolicies] = useState<VmPolicy[] | null>(null);
@@ -111,10 +103,13 @@ export default function AdminBackupsPage() {
   // Proxmox Datacenter Backup Job Management Modal State
   const [showJobModal, setShowJobModal] = useState(false);
   const [jobDetailModal, setJobDetailModal] = useState<VmPolicy | null>(null);
-  const [selectedVmId, setSelectedVmId] = useState<string>("");
+  const [selectedVmIds, setSelectedVmIds] = useState<string[]>([]);
+  const [vmSearchFilter, setVmSearchFilter] = useState<string>("");
+  const [schedulePreset, setSchedulePreset] = useState<string>("weekly");
   const [cronInput, setCronInput] = useState<string>("0 3 * * 0");
   const [keepInput, setKeepInput] = useState<number>(3);
   const [storageInput, setStorageInput] = useState<string>("local");
+  const [savingJob, setSavingJob] = useState(false);
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -146,21 +141,50 @@ export default function AdminBackupsPage() {
     }
   };
 
+  const handleToggleSelectVm = (id: string) => {
+    setSelectedVmIds((prev) =>
+      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAllVms = () => {
+    if (!policies) return;
+    if (selectedVmIds.length === policies.length) {
+      setSelectedVmIds([]);
+    } else {
+      setSelectedVmIds(policies.map((p) => p.id));
+    }
+  };
+
+  const handlePresetChange = (preset: string) => {
+    setSchedulePreset(preset);
+    if (preset === "daily") setCronInput("0 3 * * *");
+    else if (preset === "weekly") setCronInput("0 3 * * 0");
+    else if (preset === "twice_daily") setCronInput("0 */12 * * *");
+  };
+
   const handleSaveJobPolicy = async () => {
-    if (!selectedVmId) {
-      toast.error("Please select a target Virtual Machine.");
+    if (selectedVmIds.length === 0) {
+      toast.error("Please select at least one target Virtual Machine.");
       return;
     }
+    setSavingJob(true);
     try {
-      await api.patch(`/vms/${selectedVmId}`, {
-        backupCron: cronInput,
-        backupKeep: keepInput,
-      });
-      toast.success("Datacenter backup policy saved successfully.");
+      await Promise.all(
+        selectedVmIds.map((id) =>
+          api.patch(`/vms/${id}`, {
+            backupCron: cronInput,
+            backupKeep: keepInput,
+          })
+        )
+      );
+      toast.success(`Datacenter backup policy saved for ${selectedVmIds.length} guest(s).`);
       setShowJobModal(false);
       loadData();
     } catch (err) {
       toast.error(apiError(err));
+    } finally {
+      setSavingJob(false);
     }
   };
 
@@ -206,6 +230,15 @@ export default function AdminBackupsPage() {
       b.storage.toLowerCase().includes(q) ||
       (b.vm?.name && b.vm.name.toLowerCase().includes(q)) ||
       (b.vm?.user?.email && b.vm.user.email.toLowerCase().includes(q))
+    );
+  });
+
+  const filteredVmList = (policies || []).filter((p) => {
+    const q = vmSearchFilter.toLowerCase();
+    return (
+      p.name.toLowerCase().includes(q) ||
+      String(p.proxmoxVmId).includes(q) ||
+      p.user.displayName.toLowerCase().includes(q)
     );
   });
 
@@ -480,51 +513,119 @@ export default function AdminBackupsPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Proxmox Backup Job Create / Edit Modal */}
+      {/* Enhanced Multi-VM Proxmox Backup Job Modal */}
       <AlertDialog open={showJobModal} onOpenChange={setShowJobModal}>
-        <AlertDialogContent className="sm:max-w-md">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <DatabaseBackup className="size-5 text-primary" />
-              Add Proxmox Datacenter Backup Job
+        <AlertDialogContent className="max-w-xl p-6">
+          <AlertDialogHeader className="border-b pb-4">
+            <AlertDialogTitle className="flex items-center gap-2.5 text-lg">
+              <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <DatabaseBackup className="size-5" />
+              </div>
+              <div>
+                <div>Add Proxmox Datacenter Backup Job</div>
+                <div className="text-xs font-normal text-muted-foreground mt-0.5">
+                  Configure multi-VM backup schedule, storage target, and retention keep count.
+                </div>
+              </div>
             </AlertDialogTitle>
-            <AlertDialogDescription className="text-xs">
-              Configure node schedule, cron timing, storage target, and retention keep count for guest virtual machines.
-            </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="grid gap-4 py-3 text-xs">
+
+          <div className="grid gap-5 py-4 text-xs">
+            {/* Step 1: Multi-VM Selection */}
             <div>
-              <label className="block font-medium mb-1 text-foreground">Target Virtual Machine</label>
-              <Select value={selectedVmId} onValueChange={(v: any) => setSelectedVmId(String(v))}>
-                <SelectTrigger className="h-9">
-                  <SelectValue placeholder="Select target VM..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {(policies || []).map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name} (VMID: {p.proxmoxVmId} · {p.proxmoxNode})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex items-center justify-between mb-2">
+                <label className="font-semibold text-foreground flex items-center gap-1.5">
+                  <ShieldCheck className="size-4 text-primary" />
+                  Select Target Virtual Machines ({selectedVmIds.length} selected)
+                </label>
+                <Button size="sm" variant="ghost" className="h-6 text-[11px] px-2" onClick={handleSelectAllVms}>
+                  {selectedVmIds.length === (policies?.length ?? 0) ? "Deselect All" : "Select All"}
+                </Button>
+              </div>
+
+              <div className="relative mb-2">
+                <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                <Input
+                  placeholder="Filter VMs by name or ID..."
+                  value={vmSearchFilter}
+                  onChange={(e) => setVmSearchFilter(e.target.value)}
+                  className="h-8 pl-8 text-xs"
+                />
+              </div>
+
+              <div className="max-h-36 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-muted/20">
+                {filteredVmList.map((p) => {
+                  const isChecked = selectedVmIds.includes(p.id);
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => handleToggleSelectVm(p.id)}
+                      className={`flex items-center justify-between p-2 rounded cursor-pointer transition-colors ${
+                        isChecked ? "bg-primary/15 border border-primary/30" : "hover:bg-muted/50 border border-transparent"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        {isChecked ? (
+                          <CheckSquare className="size-4 text-primary shrink-0" />
+                        ) : (
+                          <Square className="size-4 text-muted-foreground shrink-0" />
+                        )}
+                        <span className="font-medium text-foreground">{p.name}</span>
+                        <span className="font-mono text-[11px] text-muted-foreground">({p.proxmoxVmId})</span>
+                      </div>
+                      <Badge variant="outline" className="text-[10px] uppercase font-mono">
+                        {p.type}
+                      </Badge>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
+            {/* Step 2: Schedule & Cron Presets */}
             <div>
-              <label className="block font-medium mb-1 text-foreground">Schedule Cron Expression</label>
+              <label className="block font-semibold text-foreground mb-1.5">Schedule Preset</label>
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                <Button
+                  type="button"
+                  variant={schedulePreset === "weekly" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handlePresetChange("weekly")}
+                  className="h-8 text-xs"
+                >
+                  Weekly (Sun 03:00)
+                </Button>
+                <Button
+                  type="button"
+                  variant={schedulePreset === "daily" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handlePresetChange("daily")}
+                  className="h-8 text-xs"
+                >
+                  Daily (03:00)
+                </Button>
+                <Button
+                  type="button"
+                  variant={schedulePreset === "twice_daily" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handlePresetChange("twice_daily")}
+                  className="h-8 text-xs"
+                >
+                  Every 12 Hours
+                </Button>
+              </div>
               <Input
                 value={cronInput}
                 onChange={(e) => setCronInput(e.target.value)}
                 placeholder="0 3 * * 0"
                 className="font-mono h-9"
               />
-              <span className="text-[11px] text-muted-foreground mt-0.5 block">
-                Standard 5-field cron (e.g., <code>0 3 * * 0</code> = Sundays 03:00)
-              </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            {/* Step 3: Retention & Target Storage Pool */}
+            <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block font-medium mb-1 text-foreground">Retention Keep Count</label>
+                <label className="block font-semibold text-foreground mb-1">Retention Keep Count</label>
                 <Input
                   type="number"
                   min={1}
@@ -533,10 +634,11 @@ export default function AdminBackupsPage() {
                   onChange={(e) => setKeepInput(Number(e.target.value))}
                   className="font-mono h-9"
                 />
+                <span className="text-[11px] text-muted-foreground mt-1 block">Rolls N newest backups</span>
               </div>
 
               <div>
-                <label className="block font-medium mb-1 text-foreground">Storage Pool</label>
+                <label className="block font-semibold text-foreground mb-1">Storage Target Pool</label>
                 <Select value={storageInput} onValueChange={(v: any) => setStorageInput(String(v))}>
                   <SelectTrigger className="h-9">
                     <SelectValue />
@@ -550,11 +652,13 @@ export default function AdminBackupsPage() {
               </div>
             </div>
           </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setShowJobModal(false)}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction onClick={handleSaveJobPolicy}>Save Backup Job</AlertDialogAction>
+
+          <AlertDialogFooter className="border-t pt-4">
+            <AlertDialogCancel onClick={() => setShowJobModal(false)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleSaveJobPolicy} disabled={savingJob}>
+              {savingJob ? <Loader2 className="size-4 animate-spin" /> : null}
+              Save Datacenter Job ({selectedVmIds.length} VMs)
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
