@@ -381,11 +381,15 @@ export default function NewVmWizard() {
         toast.success(`"${res.data.vm.name}" restored successfully.`);
         router.push(`/vms/${res.data.vm.id}`);
       } else if (isCustom) {
+        const osBasename = iso.includes('/') ? iso.split('/').pop()! : iso.includes(':') ? iso.split(':').pop()! : iso;
         const payload: Record<string, unknown> = {
           name: name.trim(),
           cpu,
+          ram: ramGb * 1024,
           ramMb: ramGb * 1024,
+          storage: storageGb,
           storageGb,
+          os: osBasename,
           iso,
         };
         if (isAdmin) {
@@ -403,8 +407,11 @@ export default function NewVmWizard() {
         const payload: Record<string, unknown> = {
           name: name.trim(),
           cpu,
+          ram: ramGb * 1024,
           ramMb: ramGb * 1024,
+          storage: storageGb,
           storageGb,
+          template: targetLxcTemplate,
           lxcTemplate: targetLxcTemplate,
           sshKey: sshKey.trim() || undefined,
           password: password || undefined,

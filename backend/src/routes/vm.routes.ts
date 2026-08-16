@@ -176,25 +176,19 @@ router.get('/live-usage', async (req: Request, res: Response) => {
 const CreateVmSchema = z.object({
   name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
   cpu: z.number().int().positive().max(64),
-  ram: z.number().int().positive(),
-  storage: z.number().int().positive(),
-  // Restrict to a bare ISO filename so it can't inject extra Proxmox drive options
-  // (the value is interpolated into `ide2: <storage>:iso/<os>,media=cdrom`).
-  os: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(iso|img)$/i, 'Must be an ISO/IMG filename'),
-  // Node name goes into the Proxmox API path — keep it to a safe charset.
-  // ADMIN-ONLY (enforced in the route): tenants never pin nodes.
+  ram: z.number().int().positive().optional(),
+  ramMb: z.number().int().positive().optional(),
+  storage: z.number().int().positive().optional(),
+  storageGb: z.number().int().positive().optional(),
+  os: z.string().min(1).max(255).optional(),
+  iso: z.string().min(1).max(255).optional(),
   node: z
     .string()
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name')
     .optional(),
-  // Admin-only: deploy INTO this user's account…
   forUserId: z.string().min(1).max(64).optional(),
-  // …optionally as a grant that doesn't count toward their quota.
   quotaExempt: z.boolean().optional(),
+  countQuota: z.boolean().optional(),
 });
 
 router.post('/', async (req: Request, res: Response) => {
@@ -204,12 +198,32 @@ router.post('/', async (req: Request, res: Response) => {
     return;
   }
 
+  const rawOs = parsed.data.os || parsed.data.iso || '';
+  if (!rawOs) {
+    res.status(400).json({ error: 'An ISO image is required to create a custom VM.' });
+    return;
+  }
+  const osBasename = rawOs.includes('/')
+    ? rawOs.split('/').pop()!
+    : rawOs.includes(':')
+    ? rawOs.split(':').pop()!
+    : rawOs;
+
+  const normalized = {
+    name: parsed.data.name,
+    cpu: parsed.data.cpu,
+    ram: parsed.data.ram ?? parsed.data.ramMb ?? 2048,
+    storage: parsed.data.storage ?? parsed.data.storageGb ?? 20,
+    os: osBasename,
+    node: parsed.data.node,
+    forUserId: parsed.data.forUserId,
+    quotaExempt: parsed.data.quotaExempt ?? (parsed.data.countQuota === false),
+  };
+
   const actor = (req as AuthRequest).user;
   try {
-    // The guest's OWNER (the acting user, or the admin's chosen tenant) — quota
-    // applies to them; node/forUserId/quotaExempt are admin-only options.
-    const owner = await resolveCreateTarget(actor, parsed.data);
-    const vm = await createVm(owner, { ...parsed.data, adminManaged: owner.id !== actor.id });
+    const owner = await resolveCreateTarget(actor, normalized);
+    const vm = await createVm(owner, { ...normalized, adminManaged: owner.id !== actor.id });
     const forNote = owner.id !== actor.id ? ` for ${owner.email}` : '';
     const exemptNote = vm.quotaExempt ? ', quota-exempt' : '';
     await recordAudit({
@@ -227,7 +241,7 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
     if (err instanceof QuotaError) {
-      res.status(403).json({ error: 'Quota exceeded', details: err.details });
+      res.status(400).json({ error: `Quota exceeded: ${err.message}`, details: err.details });
       return;
     }
     res.status(502).json({ error: pveMessage(err) });
@@ -373,16 +387,13 @@ router.post('/restore-upload', async (req: Request, res: Response) => {
 const CreateContainerSchema = z.object({
   name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
   cpu: z.number().int().positive().max(64),
-  ram: z.number().int().positive(),
-  storage: z.number().int().positive(),
-  // Full Proxmox template volid, e.g. "local:vztmpl/debian-12-standard_….tar.zst".
-  // Constrained charset since it's interpolated into the create call's ostemplate.
-  template: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*:vztmpl\/[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid template'),
-  password: z.string().min(5).max(128).optional(),
+  ram: z.number().int().positive().optional(),
+  ramMb: z.number().int().positive().optional(),
+  storage: z.number().int().positive().optional(),
+  storageGb: z.number().int().positive().optional(),
+  template: z.string().min(1).max(255).optional(),
+  lxcTemplate: z.string().min(1).max(255).optional(),
+  password: z.string().min(1).max(128).optional(),
   sshKey: z
     .string()
     .max(4000)
@@ -392,12 +403,12 @@ const CreateContainerSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name')
     .optional(),
-  // Admin-only options — see CreateVmSchema.
   forUserId: z.string().min(1).max(64).optional(),
   quotaExempt: z.boolean().optional(),
+  countQuota: z.boolean().optional(),
 });
 
-router.post('/containers', async (req: Request, res: Response) => {
+const handleContainerCreate = async (req: Request, res: Response) => {
   const parsed = CreateContainerSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
@@ -408,10 +419,30 @@ router.post('/containers', async (req: Request, res: Response) => {
     return;
   }
 
+  const rawTpl = parsed.data.template || parsed.data.lxcTemplate || '';
+  if (!rawTpl) {
+    res.status(400).json({ error: 'A container template is required.' });
+    return;
+  }
+  const fullTpl = rawTpl.includes(':') ? rawTpl : `local:vztmpl/${rawTpl}`;
+
+  const normalized = {
+    name: parsed.data.name,
+    cpu: parsed.data.cpu,
+    ram: parsed.data.ram ?? parsed.data.ramMb ?? 2048,
+    storage: parsed.data.storage ?? parsed.data.storageGb ?? 8,
+    template: fullTpl,
+    password: parsed.data.password,
+    sshKey: parsed.data.sshKey,
+    node: parsed.data.node,
+    forUserId: parsed.data.forUserId,
+    quotaExempt: parsed.data.quotaExempt ?? (parsed.data.countQuota === false),
+  };
+
   const actor = (req as AuthRequest).user;
   try {
-    const owner = await resolveCreateTarget(actor, parsed.data);
-    const vm = await createContainer(owner, { ...parsed.data, adminManaged: owner.id !== actor.id });
+    const owner = await resolveCreateTarget(actor, normalized);
+    const vm = await createContainer(owner, { ...normalized, adminManaged: owner.id !== actor.id });
     const forNote = owner.id !== actor.id ? ` for ${owner.email}` : '';
     const exemptNote = vm.quotaExempt ? ', quota-exempt' : '';
     await recordAudit({
@@ -429,12 +460,15 @@ router.post('/containers', async (req: Request, res: Response) => {
       return;
     }
     if (err instanceof QuotaError) {
-      res.status(403).json({ error: 'Quota exceeded', details: err.details });
+      res.status(400).json({ error: `Quota exceeded: ${err.message}`, details: err.details });
       return;
     }
     res.status(502).json({ error: pveMessage(err) });
   }
-});
+};
+
+router.post('/containers', handleContainerCreate);
+router.post('/lxc', handleContainerCreate);
 
 // ─── POST /api/vms/bulk ───────────────────────────────────────
 // Apply one power action to several owned VMs at once. Per-VM errors are

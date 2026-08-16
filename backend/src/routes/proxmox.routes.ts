@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { enforceMfaSetup } from '../middleware/mfa.js';
-import { getNodes, getIsos, getStorages, pveMessage } from '../services/proxmox.service.js';
+import { getNodes, getIsos, getStorages, listLxcTemplates, pveMessage } from '../services/proxmox.service.js';
 import { getProxmoxResources } from '../services/setup.service.js';
 
 const router = Router();
@@ -48,6 +48,17 @@ router.get('/isos', async (_req: Request, res: Response) => {
   try {
     const isos = await getIsos();
     res.json(isos);
+  } catch (err) {
+    res.status(502).json({ error: pveMessage(err) });
+  }
+});
+
+// ─── GET /api/proxmox/lxc-templates ──────────────────────────
+
+router.get('/lxc-templates', async (_req: Request, res: Response) => {
+  try {
+    const templates = await listLxcTemplates();
+    res.json(templates);
   } catch (err) {
     res.status(502).json({ error: pveMessage(err) });
   }
