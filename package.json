@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start": "node backend/dist/index.js",
     "start:backend": "node backend/dist/index.js",
     "start:frontend": "npm --prefix frontend start",
     "start:native": "npx pm2 start deploy/pm2.config.js"

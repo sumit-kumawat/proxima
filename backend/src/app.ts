@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import express, { type Request, type Response } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -150,6 +152,26 @@ app.use('/api/broadcast', broadcastRoutes);
 // core ones. Reserving the /api/ext segment is what makes shadowing structurally
 // impossible rather than merely unlikely. Empty unless PROXIMA_MODULES names a module.
 app.use(MODULE_MOUNT_ROOT, moduleRouter);
+
+// ─── Frontend Static Assets (Unified Hosting Support) ─────────
+const frontendExportDir = path.resolve(process.cwd(), '../frontend/out');
+const frontendNextStatic = path.resolve(process.cwd(), '../frontend/.next/static');
+const frontendPublicDir = path.resolve(process.cwd(), '../frontend/public');
+
+if (existsSync(frontendExportDir)) {
+  app.use(express.static(frontendExportDir));
+  app.get('*', (req: Request, res: Response, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/metrics')) return next();
+    res.sendFile(path.join(frontendExportDir, 'index.html'));
+  });
+} else {
+  if (existsSync(frontendNextStatic)) {
+    app.use('/_next/static', express.static(frontendNextStatic));
+  }
+  if (existsSync(frontendPublicDir)) {
+    app.use(express.static(frontendPublicDir));
+  }
+}
 
 // ─── Global Error Handler ─────────────────────────────────────
 app.use(errorHandler);
