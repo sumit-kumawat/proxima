@@ -165,7 +165,7 @@ export default function NewVmWizard() {
         setUserMe(meRes.data);
         setIsos(isoRes.data);
         setLxcTemplates(lxcRes);
-        const pub = tplRes.data.filter((t) => t.published);
+        const pub = tplRes.data;
         setTemplates(pub);
         setSavedKeys(sshRes);
         setRestoreEnabled(restoreOk);
@@ -551,8 +551,8 @@ export default function NewVmWizard() {
                     <p className="text-xs text-muted-foreground">Specify virtual machine identity and creation mode.</p>
                   </div>
 
-                  <FormField label="Virtual Machine Name" htmlFor="name" error={errors.name} hint="Use letters, numbers, and hyphens (e.g. web-server-01). Required to proceed.">
-                    <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="web-server-01" autoFocus />
+                  <FormField label="Virtual Machine Name" htmlFor="name" error={errors.name} hint="Use letters, numbers, and hyphens (e.g. web-server-01). Spaces are auto-converted to hyphens. Required to proceed.">
+                    <Input id="name" value={name} onChange={(e) => setName(e.target.value.replace(/\s+/g, "-"))} placeholder="web-server-01" autoFocus />
                   </FormField>
 
                   <FormField label="Guest Creation Mode">

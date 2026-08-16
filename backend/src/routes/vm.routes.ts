@@ -173,20 +173,22 @@ router.get('/live-usage', async (req: Request, res: Response) => {
 
 // ─── POST /api/vms ────────────────────────────────────────────
 
+const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
+
 const CreateVmSchema = z.object({
-  name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
+  name: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '') : v),
+    z.string().min(1).max(63),
+  ),
   cpu: z.number().int().positive().max(64),
   ram: z.number().int().positive().optional(),
   ramMb: z.number().int().positive().optional(),
   storage: z.number().int().positive().optional(),
   storageGb: z.number().int().positive().optional(),
-  os: z.string().min(1).max(255).optional(),
-  iso: z.string().min(1).max(255).optional(),
-  node: z
-    .string()
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name')
-    .optional(),
-  forUserId: z.string().min(1).max(64).optional(),
+  os: z.preprocess(emptyToUndefined, z.string().min(1).max(255).optional()),
+  iso: z.preprocess(emptyToUndefined, z.string().min(1).max(255).optional()),
+  node: z.preprocess(emptyToUndefined, z.string().optional()),
+  forUserId: z.preprocess(emptyToUndefined, z.string().optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
 });
@@ -389,25 +391,28 @@ router.post('/restore-upload', async (req: Request, res: Response) => {
 // takes a template volid instead of an ISO, plus optional password / SSH key.
 
 const CreateContainerSchema = z.object({
-  name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
+  name: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '') : v),
+    z.string().min(1).max(63),
+  ),
   cpu: z.number().int().positive().max(64),
   ram: z.number().int().positive().optional(),
   ramMb: z.number().int().positive().optional(),
   storage: z.number().int().positive().optional(),
   storageGb: z.number().int().positive().optional(),
-  template: z.string().min(1).max(255).optional(),
-  lxcTemplate: z.string().min(1).max(255).optional(),
-  password: z.string().min(1).max(128).optional(),
-  sshKey: z
-    .string()
-    .max(4000)
-    .optional()
-    .refine((v) => !v || /^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/m.test(v.trim()), 'Must be an OpenSSH public key'),
-  node: z
-    .string()
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'Invalid node name')
-    .optional(),
-  forUserId: z.string().min(1).max(64).optional(),
+  template: z.preprocess(emptyToUndefined, z.string().optional()),
+  lxcTemplate: z.preprocess(emptyToUndefined, z.string().optional()),
+  password: z.preprocess(emptyToUndefined, z.string().optional()),
+  sshKey: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .max(4000)
+      .optional()
+      .refine((v) => !v || /^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/m.test(v.trim()), 'Must be an OpenSSH public key'),
+  ),
+  node: z.preprocess(emptyToUndefined, z.string().optional()),
+  forUserId: z.preprocess(emptyToUndefined, z.string().optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
 });

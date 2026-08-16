@@ -52,22 +52,33 @@ router.get('/cloud-init-status', async (_req: Request, res: Response) => {
 // ─── POST /api/templates/deploy ───────────────────────────────
 // Deploy a new VM from a template (clone + autoscale).
 
+const emptyToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
+
 const DeploySchema = z.object({
   templateId: z.string().min(1),
-  name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
+  name: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '') : v),
+    z.string().min(1).max(63),
+  ),
   cpu: z.number().int().positive().max(64).optional(),
   ram: z.number().int().positive().optional(),
   ramMb: z.number().int().positive().optional(),
   storage: z.number().int().positive().optional(),
   storageGb: z.number().int().positive().optional(),
   // Cloud-init templates only:
-  sshKey: z
-    .string()
-    .max(4000)
-    .optional()
-    .refine((v) => !v || /^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/m.test(v.trim()), 'Must be an OpenSSH public key'),
-  username: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'Lowercase letters, digits, _ and - only').optional(),
-  password: z.string().min(1).max(128).optional(),
+  sshKey: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .max(4000)
+      .optional()
+      .refine((v) => !v || /^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/m.test(v.trim()), 'Must be an OpenSSH public key'),
+  ),
+  username: z.preprocess(
+    emptyToUndefined,
+    z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'Lowercase letters, digits, _ and - only').optional(),
+  ),
+  password: z.preprocess(emptyToUndefined, z.string().min(1).max(128).optional()),
   cloudInitFeatures: z.array(z.string().max(64)).max(20).optional(),
   installDocker: z.boolean().optional(),
   installTailscale: z.boolean().optional(),
@@ -75,7 +86,7 @@ const DeploySchema = z.object({
   installSuperfile: z.boolean().optional(),
   features: z.array(z.string().max(64)).max(20).optional(),
   // Admin-only: deploy INTO this user's account, optionally quota-exempt.
-  forUserId: z.string().min(1).max(64).optional(),
+  forUserId: z.preprocess(emptyToUndefined, z.string().min(1).max(64).optional()),
   quotaExempt: z.boolean().optional(),
   countQuota: z.boolean().optional(),
 });
