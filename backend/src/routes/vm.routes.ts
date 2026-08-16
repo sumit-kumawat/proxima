@@ -209,21 +209,25 @@ router.post('/', async (req: Request, res: Response) => {
     ? rawOs.split(':').pop()!
     : rawOs;
 
-  const normalized = {
+  const normalized: Record<string, unknown> = {
     name: parsed.data.name,
     cpu: parsed.data.cpu,
     ram: parsed.data.ram ?? parsed.data.ramMb ?? 2048,
     storage: parsed.data.storage ?? parsed.data.storageGb ?? 20,
     os: osBasename,
-    node: parsed.data.node,
-    forUserId: parsed.data.forUserId,
-    quotaExempt: parsed.data.quotaExempt ?? (parsed.data.countQuota === false),
   };
+  if (parsed.data.node && parsed.data.node.trim() && parsed.data.node !== 'auto') {
+    normalized.node = parsed.data.node.trim();
+  }
+  if (parsed.data.forUserId && parsed.data.forUserId.trim() && parsed.data.forUserId !== 'self') {
+    normalized.forUserId = parsed.data.forUserId.trim();
+    normalized.quotaExempt = parsed.data.quotaExempt ?? (parsed.data.countQuota === false);
+  }
 
   const actor = (req as AuthRequest).user;
   try {
     const owner = await resolveCreateTarget(actor, normalized);
-    const vm = await createVm(owner, { ...normalized, adminManaged: owner.id !== actor.id });
+    const vm = await createVm(owner, { ...(normalized as any), adminManaged: owner.id !== actor.id });
     const forNote = owner.id !== actor.id ? ` for ${owner.email}` : '';
     const exemptNote = vm.quotaExempt ? ', quota-exempt' : '';
     await recordAudit({
@@ -426,23 +430,31 @@ const handleContainerCreate = async (req: Request, res: Response) => {
   }
   const fullTpl = rawTpl.includes(':') ? rawTpl : `local:vztmpl/${rawTpl}`;
 
-  const normalized = {
+  const normalized: Record<string, unknown> = {
     name: parsed.data.name,
     cpu: parsed.data.cpu,
     ram: parsed.data.ram ?? parsed.data.ramMb ?? 2048,
     storage: parsed.data.storage ?? parsed.data.storageGb ?? 8,
     template: fullTpl,
-    password: parsed.data.password,
-    sshKey: parsed.data.sshKey,
-    node: parsed.data.node,
-    forUserId: parsed.data.forUserId,
-    quotaExempt: parsed.data.quotaExempt ?? (parsed.data.countQuota === false),
   };
+  if (parsed.data.password && parsed.data.password.trim()) {
+    normalized.password = parsed.data.password.trim();
+  }
+  if (parsed.data.sshKey && parsed.data.sshKey.trim()) {
+    normalized.sshKey = parsed.data.sshKey.trim();
+  }
+  if (parsed.data.node && parsed.data.node.trim() && parsed.data.node !== 'auto') {
+    normalized.node = parsed.data.node.trim();
+  }
+  if (parsed.data.forUserId && parsed.data.forUserId.trim() && parsed.data.forUserId !== 'self') {
+    normalized.forUserId = parsed.data.forUserId.trim();
+    normalized.quotaExempt = parsed.data.quotaExempt ?? (parsed.data.countQuota === false);
+  }
 
   const actor = (req as AuthRequest).user;
   try {
     const owner = await resolveCreateTarget(actor, normalized);
-    const vm = await createContainer(owner, { ...normalized, adminManaged: owner.id !== actor.id });
+    const vm = await createContainer(owner, { ...(normalized as any), adminManaged: owner.id !== actor.id });
     const forNote = owner.id !== actor.id ? ` for ${owner.email}` : '';
     const exemptNote = vm.quotaExempt ? ', quota-exempt' : '';
     await recordAudit({

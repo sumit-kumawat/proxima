@@ -307,7 +307,9 @@ export default function NewVmWizard() {
     ramGb > 0 &&
     storageGb >= minDisk &&
     (isAdmin || (cpu <= cpuLeft && ramGb * 1024 <= ramLeftMb && storageGb <= storageLeft));
-  const isStep4Valid = !isCloud || Boolean(sshKey.trim() || password);
+  const isStep4Valid = (isContainer || isCloud)
+    ? Boolean(sshKey.trim() || password)
+    : true;
 
   const canProceed =
     step === 1 ? isStep1Valid : step === 2 ? isStep2Valid : step === 3 ? isStep3Valid : isStep4Valid;
@@ -812,9 +814,12 @@ export default function NewVmWizard() {
                     <p className="text-xs text-muted-foreground">Configure login access credentials and review VM deployment summary.</p>
                   </div>
 
-                  {isCloud && (
+                  {(isContainer || isCloud || isCustom) && (
                     <div className="space-y-4">
-                      <FormField label="SSH Public Key" hint="Pasted output of cat ~/.ssh/id_ed25519.pub">
+                      <FormField
+                        label="SSH Public Key"
+                        hint="Pasted output of cat ~/.ssh/id_ed25519.pub — required for SSH access."
+                      >
                         <textarea
                           value={sshKey}
                           onChange={(e) => setSshKey(e.target.value)}
@@ -823,10 +828,15 @@ export default function NewVmWizard() {
                         />
                       </FormField>
                       <div className="grid gap-4 sm:grid-cols-2">
-                        <FormField label="Username">
-                          <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="debian" />
-                        </FormField>
-                        <FormField label="Password (optional)">
+                        {isCloud && (
+                          <FormField label="Username">
+                            <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="debian" />
+                          </FormField>
+                        )}
+                        <FormField
+                          label={isContainer ? "Root Password" : "Password (optional)"}
+                          hint={isContainer ? "Set container root password" : "SSH key is recommended"}
+                        >
                           <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
                         </FormField>
                       </div>
