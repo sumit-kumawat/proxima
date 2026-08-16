@@ -35,6 +35,11 @@ export async function generateMetadata(): Promise<Metadata> {
     creator: siteConfig.name,
     publisher: siteConfig.name,
     alternates: { canonical: "/" },
+    icons: {
+      icon: "/icon-rounded.png",
+      shortcut: "/favicon.ico",
+      apple: "/apple-icon.png",
+    },
     // Private control plane — keep it out of search (the meta half; robots.ts is
     // the crawler half). Shareability is unaffected: preview bots ignore robots.
     robots: {

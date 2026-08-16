@@ -37,8 +37,8 @@ export function SidebarNav() {
 
   return (
     <>
-      <div className="flex h-14 items-center gap-2 border-b px-4">
-        <BrandLogo showText />
+      <div className="flex h-16 items-center border-b px-4 py-2">
+        <BrandLogo showText={false} imageClassName="h-9 max-h-11" />
       </div>
 
       <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-3">

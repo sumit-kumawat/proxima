@@ -15,11 +15,11 @@ export function BrandLogo({ className, imageClassName, showText = false }: Brand
         In light mode (or on transparent cards on light bg), it remains transparent.
         In dark mode, it automatically renders inside a clean white card background to stay visible.
       */}
-      <div className="flex items-center justify-center rounded-lg p-1.5 transition-colors bg-transparent dark:bg-white dark:shadow-sm">
+      <div className="flex items-center justify-center rounded-lg p-2 transition-colors bg-transparent dark:bg-white dark:shadow-sm">
         <img
           src="/DarkLogo.png"
           alt="Proxima Logo"
-          className={cn("h-7 w-auto object-contain max-h-8", imageClassName)}
+          className={cn("h-10 w-auto object-contain max-h-12", imageClassName)}
         />
       </div>
       {showText && <span className="font-semibold text-lg tracking-tight">Proxima</span>}

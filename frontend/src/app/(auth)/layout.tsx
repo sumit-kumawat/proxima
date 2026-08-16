@@ -7,8 +7,8 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       <div className="absolute right-4 top-4">
         <ThemeToggle />
       </div>
-      <div className="mb-8 flex flex-col items-center gap-2">
-        <BrandLogo showText />
+      <div className="mb-8 flex flex-col items-center">
+        <BrandLogo showText={false} imageClassName="h-12 max-h-16" />
       </div>
       <div className="w-full max-w-sm">{children}</div>
       <footer className="mt-8 text-center text-xs text-muted-foreground">
