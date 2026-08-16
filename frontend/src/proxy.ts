@@ -25,7 +25,7 @@ export function proxy(request: NextRequest) {
   // "'self' https://proxima.example.com wss://proxima.example.com". A blank/unset
   // value (e.g. an empty `${CSP_CONNECT_SRC:-}` from compose) falls back to the default.
   const pinnedConnect = process.env.CSP_CONNECT_SRC?.trim();
-  const connectSrc = pinnedConnect || (isDev ? "'self' https: http: wss: ws:" : "'self' https: wss:");
+  const connectSrc = pinnedConnect || "'self' https: http: wss: ws:";
 
   // `upgrade-insecure-requests` rewrites every http:// URL on the page to https://.
   // On an HTTPS deployment that is useful hardening; on a plain-HTTP one it is fatal
