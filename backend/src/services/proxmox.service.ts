@@ -678,14 +678,25 @@ export async function getIsoNodes(
   return result;
 }
 
-/** Storages on a node that accept disk images for `import-from` (content includes `import`). */
+/** Storages on a node that accept disk images for `import-from` (content includes `import`, `iso`, or `images`). */
 export async function getImportStorages(node: string, client?: AxiosInstance): Promise<string[]> {
   const c = client ?? (await getClient());
   const res = await c.get<{ data: Array<{ storage: string; content?: string; active?: number }> }>(
     `/nodes/${node}/storage`,
   );
-  return res.data.data
-    .filter((s) => s.active !== 0 && (s.content ?? '').split(',').includes('import'))
+  const activeStorages = res.data.data.filter((s) => s.active !== 0);
+  const importOnly = activeStorages
+    .filter((s) => (s.content ?? '').split(',').includes('import'))
+    .map((s) => s.storage);
+
+  if (importOnly.length > 0) return importOnly;
+
+  // Fallback to storages with iso or images content type
+  return activeStorages
+    .filter((s) => {
+      const list = (s.content ?? '').split(',');
+      return list.includes('iso') || list.includes('images');
+    })
     .map((s) => s.storage);
 }
 

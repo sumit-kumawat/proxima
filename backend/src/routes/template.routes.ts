@@ -123,7 +123,7 @@ router.get('/all', requireAdmin, async (_req: Request, res: Response) => {
 });
 
 // Curated cloud images the admin can one-click add.
-router.get('/cloud-images', requireAdmin, (_req: Request, res: Response) => {
+router.get('/cloud-images', (_req: Request, res: Response) => {
   res.json(curatedImagesWithArch());
 });
 
@@ -205,7 +205,10 @@ router.post('/cloud-image', requireAdmin, async (req: Request, res: Response) =>
     res.status(201).json(template);
   } catch (err) {
     const msg = err instanceof Error ? err.message : pveMessage(err);
-    res.status(/must not target|must be a plain/i.test(msg) ? 400 : 502).json({ error: msg });
+    let status = 502;
+    if (/must not target|must be a plain/i.test(msg)) status = 400;
+    else if (/forbidden|permission|privilege|403/i.test(msg)) status = 403;
+    res.status(status).json({ error: msg });
   }
 });
 
