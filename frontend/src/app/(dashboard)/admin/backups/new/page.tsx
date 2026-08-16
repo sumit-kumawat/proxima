@@ -15,6 +15,7 @@ import {
   Square,
   HardDrive,
   Container,
+  MessageSquare,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -49,12 +50,14 @@ export default function NewBackupJobPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Default empty VM selection - user decides which guests to select
   const [selectedVmIds, setSelectedVmIds] = useState<string[]>([]);
   const [vmSearchFilter, setVmSearchFilter] = useState<string>("");
   const [schedulePreset, setSchedulePreset] = useState<string>("weekly");
   const [cronInput, setCronInput] = useState<string>("0 3 * * 0");
   const [keepInput, setKeepInput] = useState<number>(3);
   const [storageInput, setStorageInput] = useState<string>("local");
+  const [jobComment, setJobComment] = useState<string>("");
   const [savingJob, setSavingJob] = useState(false);
 
   useEffect(() => {
@@ -62,9 +65,6 @@ export default function NewBackupJobPage() {
       .get<VmPolicy[]>("/admin/backups/policies")
       .then((res) => {
         setPolicies(res.data);
-        if (res.data.length > 0) {
-          setSelectedVmIds(res.data.map((p) => p.id));
-        }
         setLoading(false);
       })
       .catch((err) => {
@@ -97,7 +97,7 @@ export default function NewBackupJobPage() {
 
   const handleSaveJobPolicy = async () => {
     if (selectedVmIds.length === 0) {
-      toast.error("Please select at least one target Virtual Machine.");
+      toast.error("Please select at least one target Virtual Machine to create the backup job.");
       return;
     }
     setSavingJob(true);
@@ -153,10 +153,10 @@ export default function NewBackupJobPage() {
               <div className="flex items-center justify-between border-b pb-3">
                 <div>
                   <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                    <ShieldCheck className="size-5 text-primary" /> Target Virtual Machines
+                    <ShieldCheck className="size-5 text-primary" /> Target Virtual Machines ({selectedVmIds.length} selected)
                   </h3>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Select the guest virtual machines and containers included in this backup policy.
+                    Select the guest virtual machines and containers included in this backup policy. None selected by default.
                   </p>
                 </div>
                 <Button size="sm" variant="outline" onClick={handleSelectAllVms} className="h-8 text-xs">
@@ -218,7 +218,19 @@ export default function NewBackupJobPage() {
               </div>
             </div>
 
-            {/* Section 2: Schedule & Timing */}
+            {/* Section 2: Job Comment & Description */}
+            <div className="space-y-3 border-t pt-5">
+              <FormField label="Job Comment / Description" hint="Optional note or comment describing the purpose of this backup job.">
+                <Input
+                  value={jobComment}
+                  onChange={(e) => setJobComment(e.target.value)}
+                  placeholder="e.g. Weekly production database & application snapshot policy"
+                  className="h-9 text-xs"
+                />
+              </FormField>
+            </div>
+
+            {/* Section 3: Schedule & Timing */}
             <div className="space-y-3 border-t pt-5">
               <div>
                 <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
@@ -266,7 +278,7 @@ export default function NewBackupJobPage() {
               </FormField>
             </div>
 
-            {/* Section 3: Retention & Target Storage */}
+            {/* Section 4: Retention & Target Storage */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 border-t pt-5">
               <FormField label="Retention Keep Count" hint="Keeps N newest backups before auto-pruning old snapshots.">
                 <Input
