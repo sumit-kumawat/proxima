@@ -200,6 +200,20 @@ export default function NewVmWizard() {
       });
   }, [searchParams]);
 
+  // Reactive auto-initialization for LXC Container templates
+  useEffect(() => {
+    if (lxcTemplates.length > 0 && (!lxcTemplate || !lxcTemplates.some((t) => t.volid === lxcTemplate))) {
+      setLxcTemplate(lxcTemplates[0]!.volid);
+    }
+  }, [lxcTemplates, source, lxcTemplate]);
+
+  // Reactive auto-initialization for ISO images
+  useEffect(() => {
+    if (isos.length > 0 && (!iso || !isos.some((i) => i.volid === iso))) {
+      setIso(isos[0]!.volid);
+    }
+  }, [isos, source, iso]);
+
   function applySourceSelection(
     src: string,
     tplList = templates,
@@ -215,12 +229,12 @@ export default function NewVmWizard() {
       setUsername(cloudUserForOs(tpl.os));
     } else if (src === CONTAINER) {
       setStorageGb(CONTAINER_DISK_DEFAULT);
-      if (lxcList.length > 0 && !lxcTemplate) {
+      if (lxcList.length > 0) {
         setLxcTemplate(lxcList[0]!.volid);
       }
     } else if (src === CUSTOM) {
       setStorageGb(CUSTOM_DISK_DEFAULT);
-      if (isoList.length > 0 && !iso) {
+      if (isoList.length > 0) {
         setIso(isoList[0]!.volid);
       }
     }
@@ -284,10 +298,10 @@ export default function NewVmWizard() {
   const isStep2Valid = isCustom
     ? Boolean(iso)
     : isContainer
-    ? Boolean(lxcTemplate)
+    ? Boolean(lxcTemplate || (lxcTemplates.length > 0 && lxcTemplates[0]?.volid))
     : isRestore
     ? Boolean(backupFile)
-    : Boolean(source && source !== CUSTOM);
+    : Boolean(template || (source && source !== CUSTOM && source !== CONTAINER));
   const isStep3Valid =
     cpu > 0 &&
     ramGb > 0 &&
@@ -385,12 +399,13 @@ export default function NewVmWizard() {
         toast.success(`Virtual machine "${res.data.vm.name}" created.`);
         router.push(`/vms/${res.data.vm.id}`);
       } else if (isContainer) {
+        const targetLxcTemplate = lxcTemplate || (lxcTemplates.length > 0 ? lxcTemplates[0]!.volid : "");
         const payload: Record<string, unknown> = {
           name: name.trim(),
           cpu,
           ramMb: ramGb * 1024,
           storageGb,
-          lxcTemplate,
+          lxcTemplate: targetLxcTemplate,
           sshKey: sshKey.trim() || undefined,
           password: password || undefined,
         };
@@ -609,6 +624,26 @@ export default function NewVmWizard() {
 
                   {isCustom && (
                     <FormField label="ISO Image" error={errors.iso} hint="Select an ISO image to boot from. Required to proceed.">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                        {isos.map((i) => {
+                          const isSelected = iso === i.volid;
+                          return (
+                            <div
+                              key={i.volid}
+                              onClick={() => setIso(i.volid)}
+                              className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                                isSelected ? "border-primary bg-primary/10 font-semibold" : "hover:border-primary/50 hover:bg-muted/50"
+                              }`}
+                            >
+                              <HardDrive className={`size-5 shrink-0 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                              <div className="truncate text-xs">
+                                <div className="font-medium text-foreground truncate">{i.name}</div>
+                                <div className="text-[11px] text-muted-foreground font-mono truncate">{i.volid}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                       <Select value={iso} onValueChange={(v: any) => setIso(String(v))}>
                         <SelectTrigger className="w-full">
                           <SelectValue placeholder="Select ISO..." />
@@ -625,10 +660,30 @@ export default function NewVmWizard() {
                   )}
 
                   {isContainer && (
-                    <FormField label="Container Template" error={errors.lxcTemplate} hint="Select an LXC container template. Required to proceed.">
+                    <FormField label="Container Template" error={errors.lxcTemplate} hint="Select an LXC Linux container template. Required to proceed.">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                        {lxcTemplates.map((t) => {
+                          const isSelected = lxcTemplate === t.volid;
+                          return (
+                            <div
+                              key={t.volid}
+                              onClick={() => setLxcTemplate(t.volid)}
+                              className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                                isSelected ? "border-primary bg-primary/10 font-semibold shadow-xs" : "hover:border-primary/50 hover:bg-muted/50"
+                              }`}
+                            >
+                              <Container className={`size-5 shrink-0 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                              <div className="truncate text-xs">
+                                <div className="font-medium text-foreground truncate">{t.name}</div>
+                                <div className="text-[11px] text-muted-foreground font-mono truncate">{t.volid}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                       <Select value={lxcTemplate} onValueChange={(v: any) => setLxcTemplate(String(v))}>
                         <SelectTrigger className="w-full">
-                          <SelectValue placeholder="Select LXC template..." />
+                          <SelectValue placeholder={lxcTemplates.length ? "Select LXC template..." : "No container templates available"} />
                         </SelectTrigger>
                         <SelectContent>
                           {lxcTemplates.map((t) => (
