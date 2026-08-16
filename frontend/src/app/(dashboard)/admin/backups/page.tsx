@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   DatabaseBackup,
@@ -11,20 +12,11 @@ import {
   HardDrive,
   Download,
   Calendar,
-  Layers,
   Search,
-  CheckCircle2,
-  AlertCircle,
   Clock,
   Plus,
-  Pencil,
   Info,
   Sliders,
-  CheckSquare,
-  Square,
-  ShieldCheck,
-  Server,
-  Container,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { formatBytes, formatDate } from "@/lib/format";
@@ -43,13 +35,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -101,17 +86,7 @@ export default function AdminBackupsPage() {
   const [search, setSearch] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [runningJob, setRunningJob] = useState(false);
-
-  // Proxmox Datacenter Backup Job Management Modal State
-  const [showJobModal, setShowJobModal] = useState(false);
   const [jobDetailModal, setJobDetailModal] = useState<VmPolicy | null>(null);
-  const [selectedVmIds, setSelectedVmIds] = useState<string[]>([]);
-  const [vmSearchFilter, setVmSearchFilter] = useState<string>("");
-  const [schedulePreset, setSchedulePreset] = useState<string>("weekly");
-  const [cronInput, setCronInput] = useState<string>("0 3 * * 0");
-  const [keepInput, setKeepInput] = useState<number>(3);
-  const [storageInput, setStorageInput] = useState<string>("local");
-  const [savingJob, setSavingJob] = useState(false);
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -121,13 +96,10 @@ export default function AdminBackupsPage() {
       .then(([bRes, pRes]) => {
         setBackups(bRes.data);
         setPolicies(pRes.data);
-        if (pRes.data.length > 0 && selectedVmIds.length === 0) {
-          setSelectedVmIds(pRes.data.map((p) => p.id));
-        }
         setError(null);
       })
       .catch((err) => setError(apiError(err)));
-  }, [selectedVmIds.length]);
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -143,53 +115,6 @@ export default function AdminBackupsPage() {
       toast.error(apiError(err));
     } finally {
       setRunningJob(false);
-    }
-  };
-
-  const handleToggleSelectVm = (id: string) => {
-    setSelectedVmIds((prev) =>
-      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
-    );
-  };
-
-  const handleSelectAllVms = () => {
-    if (!policies) return;
-    if (selectedVmIds.length === policies.length) {
-      setSelectedVmIds([]);
-    } else {
-      setSelectedVmIds(policies.map((p) => p.id));
-    }
-  };
-
-  const handlePresetChange = (preset: string) => {
-    setSchedulePreset(preset);
-    if (preset === "daily") setCronInput("0 3 * * *");
-    else if (preset === "weekly") setCronInput("0 3 * * 0");
-    else if (preset === "twice_daily") setCronInput("0 */12 * * *");
-  };
-
-  const handleSaveJobPolicy = async () => {
-    if (selectedVmIds.length === 0) {
-      toast.error("Please select at least one target Virtual Machine.");
-      return;
-    }
-    setSavingJob(true);
-    try {
-      await Promise.all(
-        selectedVmIds.map((id) =>
-          api.patch(`/vms/${id}`, {
-            backupCron: cronInput,
-            backupKeep: keepInput,
-          })
-        )
-      );
-      toast.success(`Datacenter backup policy saved for ${selectedVmIds.length} guest(s).`);
-      setShowJobModal(false);
-      loadData();
-    } catch (err) {
-      toast.error(apiError(err));
-    } finally {
-      setSavingJob(false);
     }
   };
 
@@ -238,23 +163,13 @@ export default function AdminBackupsPage() {
     );
   });
 
-  const filteredVmList = (policies || []).filter((p) => {
-    const q = vmSearchFilter.toLowerCase();
-    return (
-      p.name.toLowerCase().includes(q) ||
-      String(p.proxmoxVmId).includes(q) ||
-      p.user.displayName.toLowerCase().includes(q) ||
-      p.proxmoxNode.toLowerCase().includes(q)
-    );
-  });
-
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Datacenter Backup & Restore"
         description="Manage cluster-wide VM & LXC backups, automated schedules, retention policies, and 1-click in-place restores."
       >
-        <Button variant="outline" onClick={() => setShowJobModal(true)}>
+        <Button variant="outline" render={<Link href="/admin/backups/new" />}>
           <Plus className="size-4" /> Add Backup Job
         </Button>
         <Button variant="default" onClick={() => handleRunNow()} disabled={runningJob}>
@@ -451,11 +366,11 @@ export default function AdminBackupsPage() {
               <div>
                 <CardTitle className="text-base">Datacenter Backup Jobs & Schedules</CardTitle>
                 <CardDescription className="text-xs mt-1">
-                  Proxmox VE style Datacenter backup job configurations, cron schedule rules, and retention policies.
+                  Datacenter backup job configurations, cron schedule rules, and retention policies.
                 </CardDescription>
               </div>
-              <Button size="sm" variant="outline" onClick={() => setShowJobModal(true)}>
-                <Plus className="size-3.5" /> Create Backup Job
+              <Button size="sm" variant="outline" render={<Link href="/admin/backups/new" />}>
+                <Plus className="size-3.5" /> Add Backup Job
               </Button>
             </CardHeader>
             <CardContent>
@@ -518,179 +433,6 @@ export default function AdminBackupsPage() {
           </Card>
         </TabsContent>
       </Tabs>
-
-      {/* Standard Professional Proxmox VE Datacenter Backup Job Modal */}
-      <AlertDialog open={showJobModal} onOpenChange={setShowJobModal}>
-        <AlertDialogContent className="sm:max-w-3xl p-6">
-          <AlertDialogHeader className="border-b pb-4">
-            <AlertDialogTitle className="flex items-center gap-3 text-lg font-semibold">
-              <div className="flex size-10 items-center justify-center rounded-xl bg-primary/15 text-primary border border-primary/20">
-                <DatabaseBackup className="size-5" />
-              </div>
-              <div>
-                <div className="text-foreground font-bold">Add Proxmox Datacenter Backup Job</div>
-                <div className="text-xs font-normal text-muted-foreground mt-0.5">
-                  Configure multi-VM backup schedule, storage target pool, and retention rules across cluster nodes.
-                </div>
-              </div>
-            </AlertDialogTitle>
-          </AlertDialogHeader>
-
-          <div className="grid gap-6 py-4 text-xs">
-            {/* Section 1: Target Guests Selection */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <label className="font-semibold text-foreground flex items-center gap-1.5 text-sm">
-                  <ShieldCheck className="size-4 text-primary" />
-                  Target Guests ({selectedVmIds.length} of {policies?.length ?? 0} selected)
-                </label>
-                <Button size="sm" variant="outline" className="h-7 text-xs px-2.5" onClick={handleSelectAllVms}>
-                  {selectedVmIds.length === (policies?.length ?? 0) ? "Deselect All" : "Select All Guests"}
-                </Button>
-              </div>
-
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-                <Input
-                  placeholder="Filter guests by VMID, name, node, or owner..."
-                  value={vmSearchFilter}
-                  onChange={(e) => setVmSearchFilter(e.target.value)}
-                  className="h-8 pl-9 text-xs"
-                />
-              </div>
-
-              <div className="max-h-48 overflow-y-auto border rounded-lg p-2 space-y-1.5 bg-muted/30">
-                {filteredVmList.length === 0 ? (
-                  <div className="py-6 text-center text-muted-foreground text-xs">
-                    No matching virtual machines found.
-                  </div>
-                ) : (
-                  filteredVmList.map((p) => {
-                    const isChecked = selectedVmIds.includes(p.id);
-                    return (
-                      <div
-                        key={p.id}
-                        onClick={() => handleToggleSelectVm(p.id)}
-                        className={`flex items-center justify-between p-2.5 rounded-md border cursor-pointer transition-all ${
-                          isChecked
-                            ? "bg-primary/10 border-primary/40 shadow-xs"
-                            : "hover:bg-muted/60 border-transparent"
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          {isChecked ? (
-                            <CheckSquare className="size-4 text-primary shrink-0" />
-                          ) : (
-                            <Square className="size-4 text-muted-foreground shrink-0" />
-                          )}
-                          <div>
-                            <div className="font-medium text-foreground text-xs flex items-center gap-1.5">
-                              {p.type === "lxc" ? <Container className="size-3.5 text-primary" /> : <HardDrive className="size-3.5 text-primary" />}
-                              {p.name}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground font-mono mt-0.5">
-                              VMID: {p.proxmoxVmId} · Node: {p.proxmoxNode} · Owner: {p.user.displayName}
-                            </div>
-                          </div>
-                        </div>
-                        <Badge variant={isChecked ? "default" : "outline"} className="text-[10px] font-mono uppercase">
-                          {p.type}
-                        </Badge>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            {/* Section 2: Schedule & Timing */}
-            <div className="space-y-2.5 border-t pt-4">
-              <label className="flex items-center gap-1.5 font-semibold text-foreground text-sm">
-                <Clock className="size-4 text-primary" /> Schedule Presets & Timing
-              </label>
-              <div className="grid grid-cols-3 gap-3">
-                <Button
-                  type="button"
-                  variant={schedulePreset === "weekly" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => handlePresetChange("weekly")}
-                  className="h-9 text-xs gap-2 font-medium"
-                >
-                  <Clock className="size-3.5 shrink-0" /> Weekly (Sun 03:00)
-                </Button>
-                <Button
-                  type="button"
-                  variant={schedulePreset === "daily" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => handlePresetChange("daily")}
-                  className="h-9 text-xs gap-2 font-medium"
-                >
-                  <Clock className="size-3.5 shrink-0" /> Daily (03:00)
-                </Button>
-                <Button
-                  type="button"
-                  variant={schedulePreset === "twice_daily" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => handlePresetChange("twice_daily")}
-                  className="h-9 text-xs gap-2 font-medium"
-                >
-                  <Clock className="size-3.5 shrink-0" /> Every 12 Hours
-                </Button>
-              </div>
-
-              <div>
-                <label className="block text-xs text-muted-foreground mb-1">Standard 5-Field Cron Expression</label>
-                <Input
-                  value={cronInput}
-                  onChange={(e) => setCronInput(e.target.value)}
-                  placeholder="0 3 * * 0"
-                  className="font-mono h-9 text-xs"
-                />
-              </div>
-            </div>
-
-            {/* Section 3: Retention & Target Storage */}
-            <div className="grid grid-cols-2 gap-4 border-t pt-4">
-              <div>
-                <label className="block font-semibold text-foreground mb-1">Retention Keep Count</label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={30}
-                  value={keepInput}
-                  onChange={(e) => setKeepInput(Number(e.target.value))}
-                  className="font-mono h-9 text-xs"
-                />
-                <span className="text-[11px] text-muted-foreground mt-1 block">
-                  Keeps N newest backups before auto-pruning old snapshots.
-                </span>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-foreground mb-1">Target Proxmox Storage Pool</label>
-                <Select value={storageInput} onValueChange={(v: any) => setStorageInput(String(v))}>
-                  <SelectTrigger className="h-9 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="local">local (Proxmox Default Directory)</SelectItem>
-                    <SelectItem value="PROD-Storage">PROD-Storage (NFS/Ceph Shared)</SelectItem>
-                    <SelectItem value="vzdump">vzdump (Proxmox Backup Target)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </div>
-
-          <AlertDialogFooter className="border-t pt-4">
-            <AlertDialogCancel onClick={() => setShowJobModal(false)}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleSaveJobPolicy} disabled={savingJob || selectedVmIds.length === 0}>
-              {savingJob ? <Loader2 className="size-4 animate-spin" /> : null}
-              Save Datacenter Job ({selectedVmIds.length} Guests)
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Backup Job Details View Modal */}
       {jobDetailModal && (
