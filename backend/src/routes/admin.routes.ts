@@ -73,6 +73,13 @@ import { listLlmKeys, getLlmKeyEndpoint } from '../services/tenant-llm-key.servi
 import { probeModels } from '../services/ide-gateway.service.js';
 import { listResetRequests, adminResetPassword } from '../services/password-reset.service.js';
 import { refreshVmIps, getStoragePinningReport } from '../services/vm.service.js';
+import {
+  createMateState,
+  restoreFromMateState,
+  deleteMateState,
+  serializeMateState,
+  runScheduledBackups,
+} from '../services/matestate.service.js';
 import type { AuthRequest } from '../types/index.js';
 import { prisma } from '../lib/prisma.js';
 
@@ -1168,6 +1175,92 @@ router.post('/updates/apply', async (req: Request, res: Response) => {
   } catch {
     res.status(500).json({ error: 'Could not queue the update — the control directory may be unwritable.' });
   }
+});
+
+// ─── GET /api/admin/backups/all ───────────────────────────────
+// Datacenter-wide list of all guest backups across all tenants/users.
+router.get('/backups/all', async (_req: Request, res: Response) => {
+  const backups = await prisma.mateState.findMany({
+    include: {
+      vm: {
+        select: {
+          id: true,
+          name: true,
+          type: true,
+          proxmoxVmId: true,
+          user: { select: { id: true, email: true, displayName: true } },
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  res.json(
+    backups.map((b) => ({
+      ...serializeMateState(b),
+      vm: b.vm,
+    })),
+  );
+});
+
+// ─── GET /api/admin/backups/policies ──────────────────────────
+// Datacenter-wide backup policies and VM schedule rules.
+router.get('/backups/policies', async (_req: Request, res: Response) => {
+  const vms = await prisma.virtualMachine.findMany({
+    select: {
+      id: true,
+      name: true,
+      proxmoxVmId: true,
+      proxmoxNode: true,
+      type: true,
+      backupCron: true,
+      backupKeep: true,
+      user: { select: { email: true, displayName: true } },
+    },
+    orderBy: { proxmoxVmId: 'asc' },
+  });
+  res.json(vms);
+});
+
+// ─── POST /api/admin/backups/run-now ──────────────────────────
+// Admin triggers an immediate manual backup for a VM or cluster.
+router.post('/backups/run-now', async (req: Request, res: Response) => {
+  const { vmId } = req.body ?? {};
+  if (vmId && typeof vmId === 'string') {
+    const vm = await prisma.virtualMachine.findUnique({ where: { id: vmId } });
+    if (!vm) return res.status(404).json({ error: 'VM not found' });
+    const backup = await createMateState(vm, 'manual');
+    return res.json({ ok: true, backup: serializeMateState(backup) });
+  }
+
+  // Trigger cluster-wide backup run
+  runScheduledBackups().catch((err) => console.error('[admin/backups] cluster run failed:', err));
+  res.json({ ok: true, message: 'Cluster-wide backup job triggered in background' });
+});
+
+// ─── POST /api/admin/backups/:id/restore ──────────────────────
+// Admin triggers an in-place restore for a backup.
+router.post('/backups/:id/restore', async (req: Request, res: Response) => {
+  const backupId = req.params['id'] as string;
+  const backup = await prisma.mateState.findUnique({
+    where: { id: backupId },
+    include: { vm: true },
+  });
+  if (!backup || !backup.vm) return res.status(404).json({ error: 'Backup or VM not found' });
+
+  await restoreFromMateState(backup.vm, backup);
+  res.json({ ok: true, message: `Restored ${backup.vm.name} from backup ${backup.volid}` });
+});
+
+// ─── DELETE /api/admin/backups/:id ────────────────────────────
+// Admin deletes a backup volume from DB and Proxmox storage.
+router.delete('/backups/:id', async (req: Request, res: Response) => {
+  const backupId = req.params['id'] as string;
+  const backup = await prisma.mateState.findUnique({ where: { id: backupId } });
+  if (!backup) return res.status(404).json({ error: 'Backup not found' });
+
+  await deleteMateState(backup);
+  res.json({ ok: true, message: 'Backup deleted' });
 });
 
 export default router;

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, MonitorPlay, Package, Ticket, Users, Settings, BookOpen, Activity, ScrollText, Scale, TriangleAlert } from "lucide-react";
+import { LayoutDashboard, MonitorPlay, Package, Ticket, Users, Settings, BookOpen, Activity, ScrollText, Scale, TriangleAlert, Database } from "lucide-react";
 import { useAuthStore } from "@/lib/auth-store";
 import { cn } from "@/lib/utils";
 import { BrandLogo } from "@/components/brand-logo";
@@ -28,6 +28,7 @@ const NAV = [
 const ADMIN_NAV = [
   { href: "/admin/monitor", label: "Monitor", icon: Activity },
   { href: "/admin/balancer", label: "Balancer", icon: Scale },
+  { href: "/admin/backups", label: "Backup & Restore", icon: Database },
   { href: "/admin/invites", label: "Invites", icon: Ticket },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/audit", label: "Audit Log", icon: ScrollText },
