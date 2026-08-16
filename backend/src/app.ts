@@ -154,22 +154,55 @@ app.use('/api/broadcast', broadcastRoutes);
 app.use(MODULE_MOUNT_ROOT, moduleRouter);
 
 // ─── Frontend Static Assets (Unified Hosting Support) ─────────
-const frontendExportDir = path.resolve(process.cwd(), '../frontend/out');
-const frontendNextStatic = path.resolve(process.cwd(), '../frontend/.next/static');
-const frontendPublicDir = path.resolve(process.cwd(), '../frontend/public');
+const resolveFrontendDir = (...subPaths: string[]): string | null => {
+  const candidates = [
+    path.resolve(process.cwd(), 'frontend', ...subPaths),
+    path.resolve(process.cwd(), '..', 'frontend', ...subPaths),
+    path.resolve(process.cwd(), ...subPaths),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+};
 
-if (existsSync(frontendExportDir)) {
-  app.use(express.static(frontendExportDir));
+const frontendOut = resolveFrontendDir('out');
+const nextStatic = resolveFrontendDir('.next', 'static');
+const nextServerApp = resolveFrontendDir('.next', 'server', 'app');
+const frontendPublic = resolveFrontendDir('public');
+
+if (frontendOut) {
+  app.use(express.static(frontendOut));
   app.get('*', (req: Request, res: Response, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/metrics')) return next();
-    res.sendFile(path.join(frontendExportDir, 'index.html'));
+    const htmlFile = path.join(frontendOut, req.path.endsWith('.html') ? req.path : `${req.path === '/' ? '/index' : req.path}.html`);
+    if (existsSync(htmlFile)) {
+      return res.sendFile(htmlFile);
+    }
+    res.sendFile(path.join(frontendOut, 'index.html'));
   });
 } else {
-  if (existsSync(frontendNextStatic)) {
-    app.use('/_next/static', express.static(frontendNextStatic));
+  if (nextStatic) {
+    app.use('/_next/static', express.static(nextStatic));
   }
-  if (existsSync(frontendPublicDir)) {
-    app.use(express.static(frontendPublicDir));
+  if (frontendPublic) {
+    app.use(express.static(frontendPublic));
+  }
+  if (nextServerApp) {
+    app.get('*', (req: Request, res: Response, next) => {
+      if (req.path.startsWith('/api') || req.path.startsWith('/metrics')) return next();
+      const cleanPath = req.path.replace(/\/$/, '');
+      const pagePath = cleanPath === '' ? '/index.html' : `${cleanPath}.html`;
+      const targetHtml = path.join(nextServerApp, pagePath);
+      if (existsSync(targetHtml)) {
+        return res.sendFile(targetHtml);
+      }
+      const indexHtml = path.join(nextServerApp, 'index.html');
+      if (existsSync(indexHtml)) {
+        return res.sendFile(indexHtml);
+      }
+      next();
+    });
   }
 }
 
