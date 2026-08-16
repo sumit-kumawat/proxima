@@ -10,15 +10,15 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       <div className="mb-8 flex flex-col items-center">
         <BrandLogo showText={false} imageClassName="h-12 max-h-16" />
       </div>
-      <div className="w-full max-w-sm">{children}</div>
+      <div className="w-full max-w-md">{children}</div>
       <footer className="mt-8 text-center text-xs text-muted-foreground">
         <a
-          href="https://github.com/conzex/proxima"
+          href="https://www.conzex.com"
           target="_blank"
           rel="noopener noreferrer"
-          className="hover:underline"
+          className="hover:underline font-medium"
         >
-          Conzex Global Private Limited - an Opensource project.
+          CONZEX GLOBAL PRIVATE LIMITED — Proprietary Product.
         </a>
       </footer>
     </div>

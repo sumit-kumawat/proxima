@@ -9,7 +9,7 @@ export default function NewVmPage() {
   return (
     <Suspense
       fallback={
-        <div className="mx-auto max-w-xl">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <Card>
             <CardContent className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" /> Loading…

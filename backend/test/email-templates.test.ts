@@ -20,7 +20,7 @@ function expectBrandedShell(email: RenderedEmail) {
   expect(email.text.length).toBeGreaterThan(0);
   expect(email.html).toContain('<!DOCTYPE html>');
   expect(email.html).toContain('>Proxima</span>'); // wordmark header
-  expect(email.html).toContain('Conzex Global Private Limited - an Opensource project.'); // shared footer
+  expect(email.html).toContain('CONZEX GLOBAL PRIVATE LIMITED'); // shared footer
   expect(email.html).toContain('background-color:#f4f4f5'); // shared canvas colour
   expect(email.html).toContain('#18181b'); // shared ink/brand colour
 }

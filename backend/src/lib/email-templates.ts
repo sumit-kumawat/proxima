@@ -76,7 +76,7 @@ ${bodyRows}
 </tr>
 <tr>
 <td style="padding:24px 40px 32px; border-top:1px solid ${HAIR};">
-<p style="margin:0; font-family:${FONT}; font-size:12px; line-height:1.5; color:${FAINT};">Proxima &middot; Conzex Global Private Limited - an Opensource project.</p>
+<p style="margin:0; font-family:${FONT}; font-size:12px; line-height:1.5; color:${FAINT};">Proxima &middot; CONZEX GLOBAL PRIVATE LIMITED &mdash; Proprietary Product. <a href="https://www.conzex.com" style="color:${FAINT}; text-decoration:underline;">www.conzex.com</a></p>
 </td>
 </tr>
 </table>

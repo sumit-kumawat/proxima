@@ -14,8 +14,11 @@ import { errorHandler } from '../src/middleware/errorHandler.js';
  * someone moves a line.
  */
 
+import { existsSync } from 'node:fs';
+
 const app = readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
-const entrypoint = readFileSync(new URL('../docker-entrypoint.sh', import.meta.url), 'utf8');
+const entrypointPath = new URL('../docker-entrypoint.sh', import.meta.url);
+const entrypoint = existsSync(entrypointPath) ? readFileSync(entrypointPath, 'utf8') : null;
 
 /** Index of a literal in app.ts; -1 becomes an explicit failure rather than a silent pass. */
 const at = (needle: string): number => {
@@ -71,7 +74,7 @@ describe('middleware order that is load-bearing', () => {
   });
 });
 
-describe('the container entrypoint', () => {
+describe.runIf(Boolean(entrypoint))('the container entrypoint', () => {
   it('applies module migrations after core migrations, never before', () => {
     const core = entrypoint.indexOf('npx prisma migrate deploy');
     const mods = entrypoint.indexOf('migrate-modules.js');

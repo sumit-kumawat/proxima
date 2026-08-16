@@ -309,20 +309,12 @@ Questions, ideas, or a homelab to show off? Join the
 
 ## License & Attribution
 
-All credit goes to **Conzex Global Private Limited - an Opensource project.**  
-GitHub: [https://github.com/conzex/proxima](https://github.com/conzex/proxima)
-
-Proxima is **open core**:
-
-- **Community Edition** (this repository) — free and open source under the **GNU Affero
-  General Public License v3.0 (AGPLv3)**; see [LICENSE](./LICENSE).
-- **EDU Edition** — organization-scale features for schools and institutions, offered
-  under a separate [commercial license](./COMMERCIAL-LICENSE.md).
-
-See [LICENSING.md](./LICENSING.md) for details.
+Proxima is a proprietary product of **CONZEX GLOBAL PRIVATE LIMITED**.  
+Website: [https://www.conzex.com](https://www.conzex.com)
 
 ---
 
 <div align="center">
-  <sub>Conzex Global Private Limited - an Opensource project.</sub>
+  <sub>© CONZEX GLOBAL PRIVATE LIMITED — Proprietary Product.</sub>
+</div>
 </div>

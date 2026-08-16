@@ -114,12 +114,12 @@ export default function HelpPage() {
 
       <div className="mt-12 text-center text-xs text-muted-foreground border-t pt-6">
         <a
-          href="https://github.com/conzex/proxima"
+          href="https://www.conzex.com"
           target="_blank"
           rel="noopener noreferrer"
           className="hover:underline font-medium"
         >
-          Conzex Global Private Limited - an Opensource project.
+          CONZEX GLOBAL PRIVATE LIMITED — Proprietary Product.
         </a>
       </div>
     </div>

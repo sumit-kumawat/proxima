@@ -13,6 +13,17 @@ interface NetSample {
   time: string;
 }
 
+/** Standard Proxmox KiB/s / MiB/s speed formatter. */
+function formatNetSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return "0.00 KiB/s";
+  const kib = bytesPerSec / 1024;
+  if (kib < 1024) return `${kib.toFixed(2)} KiB/s`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(2)} MiB/s`;
+  const gib = mib / 1024;
+  return `${gib.toFixed(2)} GiB/s`;
+}
+
 export function RealtimeNetGraph() {
   const [samples, setSamples] = useState<NetSample[]>([]);
   const [currentNetIn, setCurrentNetIn] = useState<number>(0);
@@ -72,44 +83,46 @@ export function RealtimeNetGraph() {
   const maxVal = Math.max(1024, ...samples.map((s) => Math.max(s.netInSec, s.netOutSec)));
 
   return (
-    <Card className="mt-6">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="flex items-center gap-2 text-base font-semibold">
-          <Activity className="size-5 text-primary animate-pulse" />
-          Realtime Cluster Network Traffic
+    <Card className="mt-6 shadow-xs border-border">
+      <CardHeader className="flex flex-row items-center justify-between pb-2 border-b border-border/40">
+        <CardTitle className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Activity className="size-4 text-muted-foreground" />
+          Cluster Network Traffic (net0 / bridge)
         </CardTitle>
-        <div className="flex items-center gap-4 text-xs font-medium">
-          <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
-            <ArrowDownRight className="size-4" />
-            <span>IN: {formatBytes(currentNetIn)}/s</span>
+        <div className="flex items-center gap-4 text-xs font-mono">
+          <div className="flex items-center gap-1.5 text-foreground">
+            <ArrowDownRight className="size-3.5 text-sky-500" />
+            <span>netin: {formatNetSpeed(currentNetIn)}</span>
           </div>
-          <div className="flex items-center gap-1.5 text-blue-600 dark:text-blue-400">
-            <ArrowUpRight className="size-4" />
-            <span>OUT: {formatBytes(currentNetOut)}/s</span>
+          <div className="flex items-center gap-1.5 text-foreground">
+            <ArrowUpRight className="size-3.5 text-slate-400" />
+            <span>netout: {formatNetSpeed(currentNetOut)}</span>
           </div>
         </div>
       </CardHeader>
 
-      <CardContent>
+      <CardContent className="pt-4">
         {error ? (
           <div className="py-6 text-center text-xs text-destructive">{error}</div>
         ) : samples.length < 2 ? (
-          <div className="py-12 text-center text-xs text-muted-foreground">Initializing live network stream...</div>
+          <div className="py-12 text-center text-xs text-muted-foreground font-mono">
+            Loading Proxmox cluster network stream...
+          </div>
         ) : (
           <div className="space-y-3">
-            {/* Live Visual Chart SVG */}
-            <div className="h-44 w-full relative">
+            {/* Standard Neutral Proxmox Chart SVG */}
+            <div className="h-44 w-full relative bg-muted/10 rounded-md p-1 border border-border/30">
               <svg className="h-full w-full overflow-visible" viewBox="0 0 500 120" preserveAspectRatio="none">
-                {/* Grid lines */}
-                <line x1="0" y1="30" x2="500" y2="30" stroke="currentColor" strokeDasharray="3 3" opacity="0.1" />
-                <line x1="0" y1="60" x2="500" y2="60" stroke="currentColor" strokeDasharray="3 3" opacity="0.1" />
-                <line x1="0" y1="90" x2="500" y2="90" stroke="currentColor" strokeDasharray="3 3" opacity="0.1" />
+                {/* Proxmox Neutral Grid lines */}
+                <line x1="0" y1="30" x2="500" y2="30" stroke="currentColor" strokeDasharray="2 2" className="text-border/50" />
+                <line x1="0" y1="60" x2="500" y2="60" stroke="currentColor" strokeDasharray="2 2" className="text-border/50" />
+                <line x1="0" y1="90" x2="500" y2="90" stroke="currentColor" strokeDasharray="2 2" className="text-border/50" />
 
-                {/* Net IN line (Emerald) */}
+                {/* Net IN line (Proxmox Sky Blue) */}
                 <polyline
                   fill="none"
-                  stroke="#10b981"
-                  strokeWidth="2.5"
+                  stroke="#0284c7"
+                  strokeWidth="2"
                   points={samples
                     .map((s, i) => {
                       const x = (i / (samples.length - 1)) * 500;
@@ -119,11 +132,12 @@ export function RealtimeNetGraph() {
                     .join(" ")}
                 />
 
-                {/* Net OUT line (Electric Blue) */}
+                {/* Net OUT line (Neutral Slate Gray) */}
                 <polyline
                   fill="none"
-                  stroke="#035ffd"
-                  strokeWidth="2.5"
+                  stroke="#94a3b8"
+                  strokeWidth="2"
+                  strokeDasharray="4 2"
                   points={samples
                     .map((s, i) => {
                       const x = (i / (samples.length - 1)) * 500;
@@ -135,9 +149,9 @@ export function RealtimeNetGraph() {
               </svg>
             </div>
 
-            <div className="flex justify-between text-[11px] text-muted-foreground pt-1 border-t border-border/50">
+            <div className="flex justify-between text-[11px] text-muted-foreground font-mono pt-1 border-t border-border/40">
               <span>{samples[0]?.time || ""}</span>
-              <span className="font-mono text-xs">Peak: {formatBytes(maxVal)}/s</span>
+              <span>Max Rate: {formatNetSpeed(maxVal)}</span>
               <span>{samples[samples.length - 1]?.time || ""}</span>
             </div>
           </div>

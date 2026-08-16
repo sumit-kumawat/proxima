@@ -357,7 +357,7 @@ export default function NewVmWizard() {
   }
 
   return (
-    <div className="mx-auto max-w-xl">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <PageHeader
         title="Create a virtual machine"
         description="Build from scratch with an ISO, or clone a ready-made template — autoscaled to the size you pick."
