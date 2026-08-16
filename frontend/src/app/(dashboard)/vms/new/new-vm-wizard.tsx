@@ -19,6 +19,8 @@ import {
   Cpu,
   ShieldCheck,
   Sparkles,
+  Check,
+  AlertCircle,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
@@ -174,6 +176,13 @@ export default function NewVmWizard() {
           setSshKey(sshRes[0].publicKey);
         }
 
+        if (isoRes.data.length > 0) {
+          setIso(isoRes.data[0]!.volid);
+        }
+        if (lxcRes.length > 0) {
+          setLxcTemplate(lxcRes[0]!.volid);
+        }
+
         const pre = searchParams.get("template");
         if (pre && pub.some((t) => t.id === pre)) {
           applySourceSelection(pre, pub, isoRes.data, lxcRes);
@@ -270,14 +279,36 @@ export default function NewVmWizard() {
     (p) => p.cpu === cpu && p.ramGb === ramGb && Math.max(p.diskGb, minDisk) === storageGb,
   )?.key;
 
+  // Strict Stage Validation Helpers
+  const isStep1Valid = Boolean(name.trim());
+  const isStep2Valid = isCustom
+    ? Boolean(iso)
+    : isContainer
+    ? Boolean(lxcTemplate)
+    : isRestore
+    ? Boolean(backupFile)
+    : Boolean(source && source !== CUSTOM);
+  const isStep3Valid =
+    cpu > 0 &&
+    ramGb > 0 &&
+    storageGb >= minDisk &&
+    (isAdmin || (cpu <= cpuLeft && ramGb * 1024 <= ramLeftMb && storageGb <= storageLeft));
+  const isStep4Valid = !isCloud || Boolean(sshKey.trim() || password);
+
+  const canProceed =
+    step === 1 ? isStep1Valid : step === 2 ? isStep2Valid : step === 3 ? isStep3Valid : isStep4Valid;
+
+  const progressPct = step * 25;
+
   const nextStep = () => {
     const errs: Record<string, string> = {};
     if (step === 1) {
-      if (!name.trim()) errs.name = "Enter a virtual machine name";
-      if (Object.keys(errs).length) {
+      if (!name.trim()) {
+        errs.name = "Enter a virtual machine name before proceeding";
         setErrors(errs);
         return;
       }
+      setErrors({});
       setStep(2);
     } else if (step === 2) {
       if (isCustom && !iso) errs.iso = "Select an ISO image";
@@ -287,6 +318,7 @@ export default function NewVmWizard() {
         setErrors(errs);
         return;
       }
+      setErrors({});
       setStep(3);
     } else if (step === 3) {
       if (!isAdmin || (forUserId !== SELF && countQuota)) {
@@ -298,6 +330,7 @@ export default function NewVmWizard() {
         setErrors(errs);
         return;
       }
+      setErrors({});
       setStep(4);
     }
   };
@@ -308,6 +341,7 @@ export default function NewVmWizard() {
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!canProceed) return;
     setSubmitting(true);
     try {
       if (isRestore) {
@@ -417,46 +451,68 @@ export default function NewVmWizard() {
           <CardContent className="py-8 text-center text-sm text-destructive">{loadError}</CardContent>
         ) : (
           <CardContent className="p-6">
+            {/* Visual Progress Bar Tracker */}
+            <div className="mb-6 space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                <span>Stage {step} of 4: {step === 1 ? "General & Mode" : step === 2 ? "OS Image & Target Node" : step === 3 ? "Hardware & Sizing" : "Access & Review"}</span>
+                <span>{progressPct}% Completed</span>
+              </div>
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted/60">
+                <div
+                  className="h-full rounded-full bg-primary transition-all duration-300 shadow-xs"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+            </div>
+
             {/* 4-Step Wizard Header Indicator */}
             <div className="mb-8 border-b pb-6">
               <div className="grid grid-cols-4 gap-2 text-xs font-medium">
                 <div
                   onClick={() => setStep(1)}
-                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
-                    step === 1 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition-colors ${
+                    step === 1 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : isStep1Valid ? "text-foreground hover:bg-muted" : "text-muted-foreground"
                   }`}
                 >
-                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 1 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>1</span>
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${isStep1Valid ? "bg-emerald-500 text-white" : step === 1 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    {isStep1Valid && step > 1 ? <Check className="size-3.5" /> : "1"}
+                  </span>
                   <span className="truncate">General & Mode</span>
                 </div>
 
                 <div
-                  onClick={() => name.trim() && setStep(2)}
-                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
-                    step === 2 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  onClick={() => isStep1Valid && setStep(2)}
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition-colors ${
+                    step === 2 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : isStep2Valid ? "text-foreground hover:bg-muted" : "text-muted-foreground opacity-60"
                   }`}
                 >
-                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 2 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>2</span>
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${isStep2Valid && step > 2 ? "bg-emerald-500 text-white" : step === 2 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    {isStep2Valid && step > 2 ? <Check className="size-3.5" /> : "2"}
+                  </span>
                   <span className="truncate">OS Image & Node</span>
                 </div>
 
                 <div
-                  onClick={() => name.trim() && setStep(3)}
-                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
-                    step === 3 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  onClick={() => isStep1Valid && isStep2Valid && setStep(3)}
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition-colors ${
+                    step === 3 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : isStep3Valid ? "text-foreground hover:bg-muted" : "text-muted-foreground opacity-60"
                   }`}
                 >
-                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 3 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>3</span>
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${isStep3Valid && step > 3 ? "bg-emerald-500 text-white" : step === 3 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    {isStep3Valid && step > 3 ? <Check className="size-3.5" /> : "3"}
+                  </span>
                   <span className="truncate">Hardware & Sizing</span>
                 </div>
 
                 <div
-                  onClick={() => name.trim() && setStep(4)}
-                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition-colors ${
-                    step === 4 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground hover:bg-muted"
+                  onClick={() => isStep1Valid && isStep2Valid && isStep3Valid && setStep(4)}
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition-colors ${
+                    step === 4 ? "bg-primary/10 border border-primary/30 text-primary font-semibold" : "text-muted-foreground opacity-60"
                   }`}
                 >
-                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs ${step === 4 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>4</span>
+                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${step === 4 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    4
+                  </span>
                   <span className="truncate">Access & Review</span>
                 </div>
               </div>
@@ -471,24 +527,24 @@ export default function NewVmWizard() {
                     <p className="text-xs text-muted-foreground">Specify virtual machine identity and creation mode.</p>
                   </div>
 
-                  <FormField label="Virtual Machine Name" htmlFor="name" error={errors.name} hint="e.g. web-server-01">
+                  <FormField label="Virtual Machine Name" htmlFor="name" error={errors.name} hint="Use letters, numbers, and hyphens (e.g. web-server-01). Required to proceed.">
                     <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="web-server-01" autoFocus />
                   </FormField>
 
                   <FormField label="Guest Creation Mode">
-                    <Select value={source} onValueChange={(v) => onSourceChange(v as string)}>
+                    <Select value={source} onValueChange={(v: any) => onSourceChange(String(v))}>
                       <SelectTrigger className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value={CUSTOM}>
                           <span className="flex items-center gap-2">
-                            <Plus className="size-3.5" /> Custom VM (install from ISO)
+                            <Plus className="size-3.5 text-primary" /> Custom VM (install from ISO)
                           </span>
                         </SelectItem>
                         <SelectItem value={CONTAINER}>
                           <span className="flex items-center gap-2">
-                            <Container className="size-3.5" /> Container (LXC)
+                            <Container className="size-3.5 text-primary" /> Container (LXC)
                           </span>
                         </SelectItem>
                         {templates.length > 0 && (
@@ -509,7 +565,7 @@ export default function NewVmWizard() {
                             <SelectSeparator />
                             <SelectItem value={RESTORE}>
                               <span className="flex items-center gap-2">
-                                <ArchiveRestore className="size-3.5" /> Restore from old build
+                                <ArchiveRestore className="size-3.5 text-primary" /> Restore from old build
                               </span>
                             </SelectItem>
                           </SelectGroup>
@@ -524,7 +580,7 @@ export default function NewVmWizard() {
                         <Rocket className="size-3.5 text-primary" /> Admin options
                       </div>
                       <FormField label="Deploy for">
-                        <Select value={forUserId} onValueChange={(v) => setForUserId(v as string)}>
+                        <Select value={forUserId} onValueChange={(v: any) => setForUserId(String(v))}>
                           <SelectTrigger className="w-full">
                             <SelectValue />
                           </SelectTrigger>
@@ -552,7 +608,7 @@ export default function NewVmWizard() {
                   </div>
 
                   {isCustom && (
-                    <FormField label="ISO Image" error={errors.iso}>
+                    <FormField label="ISO Image" error={errors.iso} hint="Select an ISO image to boot from. Required to proceed.">
                       <Select value={iso} onValueChange={(v: any) => setIso(String(v))}>
                         <SelectTrigger className="w-full">
                           <SelectValue placeholder="Select ISO..." />
@@ -569,7 +625,7 @@ export default function NewVmWizard() {
                   )}
 
                   {isContainer && (
-                    <FormField label="Container Template" error={errors.lxcTemplate}>
+                    <FormField label="Container Template" error={errors.lxcTemplate} hint="Select an LXC container template. Required to proceed.">
                       <Select value={lxcTemplate} onValueChange={(v: any) => setLxcTemplate(String(v))}>
                         <SelectTrigger className="w-full">
                           <SelectValue placeholder="Select LXC template..." />
@@ -582,6 +638,20 @@ export default function NewVmWizard() {
                           ))}
                         </SelectContent>
                       </Select>
+                    </FormField>
+                  )}
+
+                  {isRestore && (
+                    <FormField label="MateState Backup File" error={errors.backupFile}>
+                      <Input
+                        type="file"
+                        accept=".zst,.gz,.lzo,.vma,.tar"
+                        onChange={(e) => {
+                          setBackupFile(e.target.files?.[0] ?? null);
+                          setErrors({});
+                        }}
+                        className="cursor-pointer"
+                      />
                     </FormField>
                   )}
 
@@ -651,7 +721,7 @@ export default function NewVmWizard() {
                       <Input type="number" min={1} value={cpu} onChange={(e) => setCpu(Number(e.target.value))} />
                     </FormField>
                     <FormField label="Memory (RAM)" error={errors.ram}>
-                      <Select value={String(ramGb)} onValueChange={(v) => setRamGb(Number(v))}>
+                      <Select value={String(ramGb)} onValueChange={(v: any) => setRamGb(Number(v))}>
                         <SelectTrigger className="w-full">
                           <SelectValue />
                         </SelectTrigger>
@@ -737,11 +807,11 @@ export default function NewVmWizard() {
                 </Button>
 
                 {step < 4 ? (
-                  <Button type="button" onClick={nextStep}>
+                  <Button type="button" onClick={nextStep} disabled={!canProceed}>
                     Next Step <ArrowRight className="size-4" />
                   </Button>
                 ) : (
-                  <Button type="submit" variant="default" disabled={submitting}>
+                  <Button type="submit" variant="default" disabled={submitting || !canProceed}>
                     {submitting ? <Loader2 className="size-4 animate-spin" /> : <Rocket className="size-4" />}
                     Create Virtual Machine
                   </Button>

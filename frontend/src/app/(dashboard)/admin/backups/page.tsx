@@ -515,7 +515,7 @@ export default function AdminBackupsPage() {
 
       {/* Enhanced Multi-VM Proxmox Backup Job Modal */}
       <AlertDialog open={showJobModal} onOpenChange={setShowJobModal}>
-        <AlertDialogContent className="max-w-xl p-6">
+        <AlertDialogContent className="sm:max-w-2xl max-w-3xl p-6">
           <AlertDialogHeader className="border-b pb-4">
             <AlertDialogTitle className="flex items-center gap-2.5 text-lg">
               <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -553,7 +553,7 @@ export default function AdminBackupsPage() {
                 />
               </div>
 
-              <div className="max-h-36 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-muted/20">
+              <div className="max-h-40 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-muted/20">
                 {filteredVmList.map((p) => {
                   const isChecked = selectedVmIds.includes(p.id);
                   return (
@@ -582,36 +582,38 @@ export default function AdminBackupsPage() {
               </div>
             </div>
 
-            {/* Step 2: Schedule & Cron Presets */}
+            {/* Step 2: Schedule & Cron Presets with Clock */}
             <div>
-              <label className="block font-semibold text-foreground mb-1.5">Schedule Preset</label>
-              <div className="grid grid-cols-3 gap-2 mb-2">
+              <label className="flex items-center gap-1.5 font-semibold text-foreground mb-2">
+                <Clock className="size-4 text-primary" /> Schedule Preset
+              </label>
+              <div className="grid grid-cols-3 gap-2.5 mb-3">
                 <Button
                   type="button"
                   variant={schedulePreset === "weekly" ? "default" : "outline"}
                   size="sm"
                   onClick={() => handlePresetChange("weekly")}
-                  className="h-8 text-xs"
+                  className="h-9 text-xs gap-1.5"
                 >
-                  Weekly (Sun 03:00)
+                  <Clock className="size-3.5 shrink-0" /> Weekly (Sun 03:00)
                 </Button>
                 <Button
                   type="button"
                   variant={schedulePreset === "daily" ? "default" : "outline"}
                   size="sm"
                   onClick={() => handlePresetChange("daily")}
-                  className="h-8 text-xs"
+                  className="h-9 text-xs gap-1.5"
                 >
-                  Daily (03:00)
+                  <Clock className="size-3.5 shrink-0" /> Daily (03:00)
                 </Button>
                 <Button
                   type="button"
                   variant={schedulePreset === "twice_daily" ? "default" : "outline"}
                   size="sm"
                   onClick={() => handlePresetChange("twice_daily")}
-                  className="h-8 text-xs"
+                  className="h-9 text-xs gap-1.5"
                 >
-                  Every 12 Hours
+                  <Clock className="size-3.5 shrink-0" /> Every 12 Hours
                 </Button>
               </div>
               <Input

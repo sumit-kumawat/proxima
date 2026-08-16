@@ -55,9 +55,11 @@ router.get('/cloud-init-status', async (_req: Request, res: Response) => {
 const DeploySchema = z.object({
   templateId: z.string().min(1),
   name: z.string().min(1).max(63).regex(/^[a-zA-Z0-9-]+$/, 'Use letters, numbers and hyphens only'),
-  cpu: z.number().int().positive().max(64),
-  ram: z.number().int().positive(),
-  storage: z.number().int().positive(),
+  cpu: z.number().int().positive().max(64).optional(),
+  ram: z.number().int().positive().optional(),
+  ramMb: z.number().int().positive().optional(),
+  storage: z.number().int().positive().optional(),
+  storageGb: z.number().int().positive().optional(),
   // Cloud-init templates only:
   sshKey: z
     .string()
@@ -66,15 +68,16 @@ const DeploySchema = z.object({
     .refine((v) => !v || /^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-)/m.test(v.trim()), 'Must be an OpenSSH public key'),
   username: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'Lowercase letters, digits, _ and - only').optional(),
   password: z.string().min(1).max(128).optional(),
+  cloudInitFeatures: z.array(z.string().max(64)).max(20).optional(),
   installDocker: z.boolean().optional(),
   installTailscale: z.boolean().optional(),
   installGuestAgent: z.boolean().optional(),
   installSuperfile: z.boolean().optional(),
   features: z.array(z.string().max(64)).max(20).optional(),
-  // Admin-only: deploy INTO this user's account, optionally quota-exempt. NOTE:
-  // template deploys cannot choose a node — the clone stays on the template's.
+  // Admin-only: deploy INTO this user's account, optionally quota-exempt.
   forUserId: z.string().min(1).max(64).optional(),
   quotaExempt: z.boolean().optional(),
+  countQuota: z.boolean().optional(),
 });
 
 router.post('/deploy', async (req: Request, res: Response) => {
@@ -97,11 +100,16 @@ router.post('/deploy', async (req: Request, res: Response) => {
     return;
   }
 
+  const normalized = {
+    ...parsed.data,
+    cpu: parsed.data.cpu ?? 1,
+    ram: parsed.data.ram ?? parsed.data.ramMb ?? 2048,
+    storage: parsed.data.storage ?? parsed.data.storageGb ?? template.diskGb,
+  };
+
   try {
-    // The guest's OWNER (the acting user, or the admin's chosen tenant) — quota
-    // applies to them; forUserId/quotaExempt are admin-only options.
-    const owner = await resolveCreateTarget(actor, parsed.data);
-    const vm = await deployFromTemplate(owner, template, { ...parsed.data, adminManaged: owner.id !== actor.id });
+    const owner = await resolveCreateTarget(actor, normalized);
+    const vm = await deployFromTemplate(owner, template, { ...normalized, adminManaged: owner.id !== actor.id });
     res.status(201).json({ vm, status: vm.status });
   } catch (err) {
     if (err instanceof CreateOptionError) {
@@ -109,7 +117,7 @@ router.post('/deploy', async (req: Request, res: Response) => {
       return;
     }
     if (err instanceof QuotaError) {
-      res.status(403).json({ error: 'Quota exceeded', details: err.details });
+      res.status(400).json({ error: `Quota exceeded: ${err.message}`, details: err.details });
       return;
     }
     res.status(502).json({ error: pveMessage(err) });
