@@ -214,13 +214,16 @@ invite links for your users from **Admin → Invites**.
 
 ---
 
-## Production deployment
+## Production deployment (Native Node.js & PM2)
 
 ```bash
-cp .env.docker.example .env
-openssl rand -hex 32           # → paste into ENCRYPTION_KEY in .env
-nano .env                      # ← do not skip: see the note below
-docker compose up -d --build
+# Install & build backend and frontend
+cd backend && npm install && npx prisma generate && cd ..
+cd frontend && npm install && cd ..
+npm run build
+
+# Start natively with PM2
+npx pm2 start deploy/pm2.config.js
 ```
 
 > **Editing `.env` is not optional.** The file ships with its **PRODUCTION** block

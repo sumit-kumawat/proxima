@@ -74,14 +74,15 @@ echo "==> Updating Proxima to $TAG"
 status "running" "Checking out $TAG" "$TAG"
 git checkout -q --force "refs/tags/$TAG"
 
-status "running" "Building images" "$TAG"
-docker compose build
+status "running" "Installing dependencies and building" "$TAG"
+(cd backend && npm install && npx prisma generate)
+(cd frontend && npm install)
+npm run build
 
-status "running" "Restarting (applies DB migrations on boot)" "$TAG"
-docker compose up -d
-
-# Prune the now-dangling previous image layers (best effort).
-docker image prune -f >/dev/null 2>&1 || true
+status "running" "Restarting Proxima service" "$TAG"
+if command -v pm2 >/dev/null 2>&1; then
+  pm2 restart deploy/pm2.config.js || pm2 start deploy/pm2.config.js
+fi
 
 status "success" "Updated to $TAG" "$TAG"
 echo "==> Proxima is now on $TAG"
